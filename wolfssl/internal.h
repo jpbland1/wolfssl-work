@@ -265,6 +265,8 @@
     #include <wolfssl/wolfcrypt/port/Renesas/renesas-tsip-crypt.h>
 #endif
 
+#include <wolfssl/wolfcrypt/hpke.h>
+
 #ifdef __cplusplus
     extern "C" {
 #endif
@@ -2532,7 +2534,59 @@ typedef enum {
 #ifdef WOLFSSL_QUIC
     TLSX_KEY_QUIC_TP_PARAMS_DRAFT   = 0xffa5, /* from draft-ietf-quic-tls-27 */
 #endif
+#if defined(HAVE_HPKE) && defined(HAVE_ECC)
+    TLSX_ECH                        = 0xfe0d,
+#endif
 } TLSX_Type;
+
+#if defined(HAVE_HPKE) && defined(HAVE_ECC)
+typedef struct EchCipherSuite
+{
+    word16 kdf_id;
+    word16 aead_id;
+} EchCipherSuite;
+
+typedef struct EchConfig
+{
+    byte config_id;
+    word16 kem_id;
+    byte receiver_pubkey[HPKE_Npk_MAX];
+    byte num_cipher_suites;
+    EchCipherSuite* cipher_suites;
+    char* public_name;
+    byte* raw;
+    word32 raw_len;
+    struct EchConfig* next;
+} EchConfig;
+
+typedef struct ECH
+{
+    byte type;
+    word16 kem_id;
+    struct
+    {
+      word16 kdf_id;
+      word16 aead_id;
+    } cipher_suite;
+    byte config_id;
+    byte enc[HPKE_Npk_MAX];
+    word32 enc_len;
+    word32 inner_client_hello_len;
+    word32 padding_len;
+    byte* inner_client_hello;
+    byte* outer_client_payload_p;
+    byte* aad;
+    word32 aad_len;
+    Hpke* hpke;
+    void* ephemeral_key;
+    word32 is_grease:1;
+    EchConfig* ech_config;
+} ECH;
+
+int EchConfigGetSupportedCipherSuite(EchConfig* config);
+
+WOLFSSL_LOCAL int   TLSX_FinalizeEch(ECH* ech, byte* aad, word32 aad_len);
+#endif
 
 typedef struct TLSX {
     TLSX_Type    type; /* Extension Type  */
@@ -4175,6 +4229,9 @@ typedef struct Options {
 #ifdef WOLFSSL_DTLS_CID
     byte            useDtlsCID:1;
 #endif /* WOLFSSL_DTLS_CID */
+#if defined(HAVE_HPKE) && defined(HAVE_ECC)
+    byte            useEch:1;
+#endif
 } Options;
 
 typedef struct Arrays {
@@ -4190,6 +4247,7 @@ typedef struct Arrays {
     byte            psk_key[MAX_PSK_KEY_LEN];
 #endif
     byte            clientRandom[RAN_LEN];
+    byte            clientRandomInner[RAN_LEN];
     byte            serverRandom[RAN_LEN];
     byte            sessionID[ID_LEN];
     byte            sessionIDSz;
@@ -4744,6 +4802,9 @@ struct WOLFSSL {
     byte            serverSecret[SECRET_LEN];
 #endif
     HS_Hashes*      hsHashes;
+#if defined(HAVE_HPKE) && defined(HAVE_ECC)
+    HS_Hashes*      hsHashesEch;
+#endif
     void*           IOCB_ReadCtx;
     void*           IOCB_WriteCtx;
     WC_RNG*         rng;
@@ -5197,6 +5258,9 @@ struct WOLFSSL {
                                           * content have not been handled yet by quic */
     } quic;
 #endif /* WOLFSSL_QUIC */
+#if defined(HAVE_HPKE) && defined(HAVE_ECC)
+  EchConfig* ech_configs;
+#endif
 };
 
 /*
@@ -5690,6 +5754,7 @@ WOLFSSL_LOCAL int SetDhExternal(WOLFSSL_DH *dh);
 
 WOLFSSL_LOCAL int InitHandshakeHashes(WOLFSSL* ssl);
 WOLFSSL_LOCAL void FreeHandshakeHashes(WOLFSSL* ssl);
+WOLFSSL_LOCAL int InitHandshakeHashesAndCopy(WOLFSSL* ssl, HS_Hashes* source, HS_Hashes** destination);
 
 
 #ifndef WOLFSSL_NO_TLS12
