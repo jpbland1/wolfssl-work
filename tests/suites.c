@@ -43,6 +43,7 @@
 #include <wolfssl/wolfcrypt/ecc.h>
 #endif
 
+#include <wolfssl/wolfcrypt/memory.h> /* for LARGEST_MEM_BUCKET */
 
 #define MAX_ARGS 40
 #define MAX_COMMAND_SZ 240
@@ -1151,6 +1152,18 @@ int SuiteTest(int argc, char** argv)
         args.return_code = EXIT_FAILURE;
         goto exit;
     }
+    args.argc = 3;
+    strcpy(argv0[1], "tests/test-dtls13-downgrade-fails.conf");
+    strcpy(argv0[2], "expFail");
+    printf("starting DTLSv1.3 suite - downgrade - (expFails)\n");
+    test_harness(&args);
+    if (args.return_code != 0) {
+        printf("error from script %d\n", args.return_code);
+        args.return_code = EXIT_FAILURE;
+        goto exit;
+    }
+    args.argc = 2;
+    XMEMSET(argv0[2], 0, sizeof(argv0[2]));
 #endif /* WOLFSSL_NO_TLS12 */
 
 #ifndef NO_PSK

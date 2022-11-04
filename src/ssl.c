@@ -162,6 +162,16 @@
 #endif
 #endif /* !WOLFCRYPT_ONLY || OPENSSL_EXTRA */
 
+#ifdef _WIN32
+#include <windows.h>
+#include <Wincrypt.h>
+#pragma comment(lib, "crypt32")
+#endif
+
+#ifdef __APPLE__
+# include <Security/SecTrustSettings.h>
+#endif
+
 /*
  * OPENSSL_COMPATIBLE_DEFAULTS:
  *     Enable default behaviour that is compatible with OpenSSL. For example
@@ -174,7 +184,13 @@
  *     ClientCache by default for backwards compatibility. This define will
  *     make wolfSSL_get_session return a reference to ssl->session. The returned
  *     pointer will be freed with the related WOLFSSL object.
+ * WOLFSSL_SYS_CA_CERTS
+ *     Enables ability to load system CA certs from the OS via
+ *     wolfSSL_CTX_load_system_CA_certs.
  */
+
+#define WOLFSSL_SSL_MISC_INCLUDED
+#include "src/ssl_misc.c"
 
 #define WOLFSSL_EVP_INCLUDED
 #include "wolfcrypt/src/evp.c"
@@ -2455,6 +2471,49 @@ int wolfSSL_SetMinRsaKey_Sz(WOLFSSL* ssl, short keySz)
 #endif /* !NO_RSA */
 
 #ifndef NO_DH
+
+#ifdef OPENSSL_EXTRA
+long wolfSSL_set_tmp_dh(WOLFSSL *ssl, WOLFSSL_DH *dh)
+{
+    int pSz, gSz;
+    byte *p, *g;
+    int ret = 0;
+
+    WOLFSSL_ENTER("wolfSSL_set_tmp_dh");
+
+    if (!ssl || !dh)
+        return BAD_FUNC_ARG;
+
+    /* Get needed size for p and g */
+    pSz = wolfSSL_BN_bn2bin(dh->p, NULL);
+    gSz = wolfSSL_BN_bn2bin(dh->g, NULL);
+
+    if (pSz <= 0 || gSz <= 0)
+        return -1;
+
+    p = (byte*)XMALLOC(pSz, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
+    if (!p)
+        return MEMORY_E;
+
+    g = (byte*)XMALLOC(gSz, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
+    if (!g) {
+        XFREE(p, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
+        return MEMORY_E;
+    }
+
+    pSz = wolfSSL_BN_bn2bin(dh->p, p);
+    gSz = wolfSSL_BN_bn2bin(dh->g, g);
+
+    if (pSz >= 0 && gSz >= 0) /* Conversion successful */
+        ret = wolfSSL_SetTmpDH(ssl, p, pSz, g, gSz);
+
+    XFREE(p, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
+    XFREE(g, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
+
+    return pSz > 0 && gSz > 0 ? ret : -1;
+}
+#endif /* OPENSSL_EXTRA */
+
 /* server Diffie-Hellman parameters, WOLFSSL_SUCCESS on ok */
 int wolfSSL_SetTmpDH(WOLFSSL* ssl, const unsigned char* p, int pSz,
                     const unsigned char* g, int gSz)
@@ -3416,22 +3475,44 @@ int wolfSSL_ALPN_GetProtocol(WOLFSSL* ssl, char **protocol_name, word16 *size)
 
 int wolfSSL_ALPN_GetPeerProtocol(WOLFSSL* ssl, char **list, word16 *listSz)
 {
-    if (list == NULL || listSz == NULL)
+    int i, len;
+    char *p;
+    byte *s;
+
+    if (ssl == NULL || list == NULL || listSz == NULL)
         return BAD_FUNC_ARG;
 
-    if (ssl->alpn_client_list == NULL)
+    if (ssl->alpn_peer_requested == NULL
+        || ssl->alpn_peer_requested_length == 0)
         return BUFFER_ERROR;
 
-    *listSz = (word16)XSTRLEN(ssl->alpn_client_list);
-    if (*listSz == 0)
-        return BUFFER_ERROR;
-
-    *list = (char *)XMALLOC((*listSz)+1, ssl->heap, DYNAMIC_TYPE_TLSX);
-    if (*list == NULL)
+    /* ssl->alpn_peer_requested are the original bytes sent in a ClientHello,
+     * formatted as (len-byte chars+)+. To turn n protocols into a
+     * comma-separated C string, one needs (n-1) commas and a final 0 byte
+     * which has the same length as the original.
+     * The returned length is the strlen() of the C string, so -1 of that. */
+    *listSz = ssl->alpn_peer_requested_length-1;
+    *list = p = (char *)XMALLOC(ssl->alpn_peer_requested_length, ssl->heap,
+                                DYNAMIC_TYPE_TLSX);
+    if (p == NULL)
         return MEMORY_ERROR;
 
-    XSTRNCPY(*list, ssl->alpn_client_list, (*listSz)+1);
-    (*list)[*listSz] = 0;
+    for (i = 0, s = ssl->alpn_peer_requested;
+         i < ssl->alpn_peer_requested_length;
+         p += len, i += len)
+    {
+        if (i)
+            *p++ = ',';
+        len = s[i++];
+        /* guard against bad length bytes. */
+        if (i + len > ssl->alpn_peer_requested_length) {
+            XFREE(*list, ssl->heap, DYNAMIC_TYPE_TLSX);
+            *list = NULL;
+            return WOLFSSL_FAILURE;
+        }
+        XMEMCPY(p, s + i, len);
+    }
+    *p = 0;
 
     return WOLFSSL_SUCCESS;
 }
@@ -4240,6 +4321,13 @@ const byte* wolfSSL_GetMacSecret(WOLFSSL* ssl, int verify)
 #endif
 }
 
+int wolfSSL_GetSide(WOLFSSL* ssl)
+{
+    if (ssl)
+        return ssl->options.side;
+
+    return BAD_FUNC_ARG;
+}
 
 #ifdef ATOMIC_USER
 
@@ -4479,14 +4567,6 @@ int wolfSSL_IsTLSv1_1(WOLFSSL* ssl)
 }
 
 
-int wolfSSL_GetSide(WOLFSSL* ssl)
-{
-    if (ssl)
-        return ssl->options.side;
-
-    return BAD_FUNC_ARG;
-}
-
 
 int wolfSSL_GetHmacSize(WOLFSSL* ssl)
 {
@@ -4688,7 +4768,7 @@ WOLFSSL_STACK* wolfSSL_CertManagerGetCerts(WOLFSSL_CERT_MANAGER* cm)
     if (cm == NULL)
         return NULL;
 
-    sk = wolfSSL_sk_X509_new();
+    sk = wolfSSL_sk_X509_new_null();
     if (sk == NULL)
         goto error;
 
@@ -5834,7 +5914,8 @@ int AddCA(WOLFSSL_CERT_MANAGER* cm, DerBuffer** pDer, int type, int verify)
 #endif /* !NO_SESSION_CACHE */
 
 #if !defined(WC_NO_RNG) && (defined(OPENSSL_EXTRA) || \
-    (defined(OPENSSL_EXTRA_X509_SMALL) && !defined(NO_RSA)))
+    (defined(OPENSSL_EXTRA_X509_SMALL) && !defined(NO_RSA)) || \
+    (defined(OPENSSL_ALL) && !defined(NO_DH)))
 
     #define HAVE_GLOBAL_RNG /* consolidate flags for using globalRNG */
     static WC_RNG globalRNG;
@@ -8362,6 +8443,204 @@ int wolfSSL_CTX_load_verify_locations(WOLFSSL_CTX* ctx, const char* file,
     return WS_RETURN_CODE(ret,WOLFSSL_FAILURE);
 }
 
+#ifdef WOLFSSL_SYS_CA_CERTS
+
+#ifdef USE_WINDOWS_API
+
+static int LoadSystemCaCertsWindows(WOLFSSL_CTX* ctx, byte* loaded)
+{
+    int ret = WOLFSSL_SUCCESS;
+    word32 i;
+    HANDLE handle = NULL;
+    PCCERT_CONTEXT certCtx = NULL;
+    LPCSTR storeNames[2] = {"ROOT", "CA"};
+    HCRYPTPROV_LEGACY hProv = (HCRYPTPROV_LEGACY)NULL;
+
+    if (ctx == NULL || loaded == NULL) {
+        ret = WOLFSSL_FAILURE;
+    }
+
+    for (i = 0; ret == WOLFSSL_SUCCESS &&
+         i < sizeof(storeNames)/sizeof(*storeNames); ++i) {
+        handle = CertOpenSystemStoreA(hProv, storeNames[i]);
+        if (handle != NULL) {
+            while (certCtx = CertEnumCertificatesInStore(handle,
+                   certCtx)) {
+                if (certCtx->dwCertEncodingType == X509_ASN_ENCODING) {
+                    if (ProcessBuffer(ctx, certCtx->pbCertEncoded,
+                          certCtx->cbCertEncoded, WOLFSSL_FILETYPE_ASN1,
+                          CA_TYPE, NULL, NULL, 0,
+                          GET_VERIFY_SETTING_CTX(ctx)) == WOLFSSL_SUCCESS) {
+                        /*
+                         * Set "loaded" as long as we've loaded one CA
+                         * cert.
+                         */
+                        *loaded = 1;
+                    }
+                }
+            }
+        }
+        else {
+            WOLFSSL_MSG_EX("Failed to open cert store %s.", storeNames[i]);
+        }
+
+        if (handle != NULL && !CertCloseStore(handle, 0)) {
+            WOLFSSL_MSG_EX("Failed to close cert store %s.", storeNames[i]);
+            ret = WOLFSSL_FAILURE;
+        }
+    }
+
+    return ret;
+}
+
+#elif defined(__APPLE__)
+
+static int LoadSystemCaCertsMac(WOLFSSL_CTX* ctx, byte* loaded)
+{
+    int ret = WOLFSSL_SUCCESS;
+    word32 i;
+    const unsigned int trustDomains[] = {
+        kSecTrustSettingsDomainUser,
+        kSecTrustSettingsDomainAdmin,
+        kSecTrustSettingsDomainSystem
+    };
+    CFArrayRef certs;
+    OSStatus stat;
+    CFIndex numCerts;
+    CFDataRef der;
+    CFIndex j;
+
+    if (ctx == NULL || loaded == NULL) {
+        ret = WOLFSSL_FAILURE;
+    }
+
+    for (i = 0; ret == WOLFSSL_SUCCESS &&
+         i < sizeof(trustDomains)/sizeof(*trustDomains); ++i) {
+        stat = SecTrustSettingsCopyCertificates(trustDomains[i], &certs);
+
+        if (stat == errSecSuccess) {
+            numCerts = CFArrayGetCount(certs);
+            for (j = 0; j < numCerts; ++j) {
+                der = SecCertificateCopyData((SecCertificateRef)
+                          CFArrayGetValueAtIndex(certs, j));
+                if (der != NULL) {
+                    if (ProcessBuffer(ctx, CFDataGetBytePtr(der),
+                          CFDataGetLength(der), WOLFSSL_FILETYPE_ASN1,
+                          CA_TYPE, NULL, NULL, 0,
+                          GET_VERIFY_SETTING_CTX(ctx)) == WOLFSSL_SUCCESS) {
+                        /*
+                         * Set "loaded" as long as we've loaded one CA
+                         * cert.
+                         */
+                        *loaded = 1;
+                    }
+
+                    CFRelease(der);
+                }
+            }
+
+            CFRelease(certs);
+        }
+        else if (stat == errSecNoTrustSettings) {
+            WOLFSSL_MSG_EX("No trust settings for domain %d, moving to next "
+                "domain.", trustDomains[i]);
+        }
+        else {
+            WOLFSSL_MSG_EX("SecTrustSettingsCopyCertificates failed with"
+                " status %d.", stat);
+            ret = WOLFSSL_FAILURE;
+            break;
+        }
+    }
+
+    return ret;
+}
+
+#else
+
+/* Potential system CA certs directories on Linux distros. */
+static const char* systemCaDirs[] = {
+    "/etc/ssl/certs",                   /* Debian, Ubuntu, Gentoo, others */
+    "/etc/pki/ca-trust/source/anchors", /* Fedora, RHEL */
+    "/etc/pki/tls/certs"                /* Older RHEL */
+};
+
+const char** wolfSSL_get_system_CA_dirs(word32* num)
+{
+    const char** ret;
+
+    if (num == NULL) {
+        ret = NULL;
+    }
+    else {
+        ret = systemCaDirs;
+        *num = sizeof(systemCaDirs)/sizeof(*systemCaDirs);
+    }
+
+    return ret;
+}
+
+static int LoadSystemCaCertsNix(WOLFSSL_CTX* ctx, byte* loaded) {
+    int ret = WOLFSSL_SUCCESS;
+    word32 i;
+
+    if (ctx == NULL || loaded == NULL) {
+        ret = WOLFSSL_FAILURE;
+    }
+
+    for (i = 0; ret == WOLFSSL_SUCCESS &&
+         i < sizeof(systemCaDirs)/sizeof(*systemCaDirs); ++i) {
+        WOLFSSL_MSG_EX("Attempting to load system CA certs from %s.",
+            systemCaDirs[i]);
+        /*
+         * We want to keep trying to load more CAs even if one cert in
+         * the directory is bad and can't be used (e.g. if one is expired),
+         * so we use WOLFSSL_LOAD_FLAG_IGNORE_ERR.
+         */
+        if (wolfSSL_CTX_load_verify_locations_ex(ctx, NULL, systemCaDirs[i],
+                WOLFSSL_LOAD_FLAG_IGNORE_ERR) != WOLFSSL_SUCCESS) {
+            WOLFSSL_MSG_EX("Failed to load CA certs from %s, trying "
+                "next possible location.", systemCaDirs[i]);
+        }
+        else {
+            WOLFSSL_MSG_EX("Loaded CA certs from %s.",
+                systemCaDirs[i]);
+            *loaded = 1;
+            /* Stop searching after we've loaded one directory. */
+            break;
+        }
+    }
+
+    return ret;
+}
+
+#endif
+
+int wolfSSL_CTX_load_system_CA_certs(WOLFSSL_CTX* ctx)
+{
+    int ret;
+    byte loaded = 0;
+
+    WOLFSSL_ENTER("wolfSSL_CTX_load_system_CA_certs");
+
+#ifdef USE_WINDOWS_API
+    ret = LoadSystemCaCertsWindows(ctx, &loaded);
+#elif defined(__APPLE__)
+    ret = LoadSystemCaCertsMac(ctx, &loaded);
+#else
+    ret = LoadSystemCaCertsNix(ctx, &loaded);
+#endif
+
+    if (ret == WOLFSSL_SUCCESS && !loaded) {
+        ret = WOLFSSL_BAD_PATH;
+    }
+
+    WOLFSSL_LEAVE("wolfSSL_CTX_load_system_CA_certs", ret);
+
+    return ret;
+}
+
+#endif /* WOLFSSL_SYS_CA_CERTS */
 
 #ifdef WOLFSSL_TRUST_PEER_CERT
 /* Used to specify a peer cert to match when connecting
@@ -9133,7 +9412,7 @@ WOLFSSL_EVP_PKEY* wolfSSL_CTX_get0_privatekey(const WOLFSSL_CTX* ctx)
 #if defined(OPENSSL_EXTRA) || defined(WOLFSSL_WPAS_SMALL)
 
 static WOLFSSL_EVP_PKEY* d2iGenericKey(WOLFSSL_EVP_PKEY** out,
-                                 const unsigned char** in, long inSz, int priv)
+    const unsigned char** in, long inSz, int priv)
 {
 
     WOLFSSL_EVP_PKEY* pkey = NULL;
@@ -9191,16 +9470,9 @@ static WOLFSSL_EVP_PKEY* d2iGenericKey(WOLFSSL_EVP_PKEY** out,
                 }
 
                 pkey->ownRsa = 1;
-                pkey->rsa = wolfSSL_RSA_new();
+                pkey->rsa = wolfssl_rsa_d2i(NULL, mem, inSz,
+                    priv ? WOLFSSL_RSA_LOAD_PRIVATE : WOLFSSL_RSA_LOAD_PUBLIC);
                 if (pkey->rsa == NULL) {
-                    wolfSSL_EVP_PKEY_free(pkey);
-                    return NULL;
-                }
-
-                if (wolfSSL_RSA_LoadDer_ex(pkey->rsa,
-                        (const unsigned char*)pkey->pkey.ptr,
-                        pkey->pkey_sz, priv ? WOLFSSL_RSA_LOAD_PRIVATE
-                                            : WOLFSSL_RSA_LOAD_PUBLIC) != 1) {
                     wolfSSL_EVP_PKEY_free(pkey);
                     return NULL;
                 }
@@ -9947,16 +10219,11 @@ static WOLFSSL_EVP_PKEY* _d2i_PublicKey(int type, WOLFSSL_EVP_PKEY** out,
     switch (type) {
 #ifndef NO_RSA
         case EVP_PKEY_RSA:
-            local->ownRsa = 1;
-            local->rsa = wolfSSL_RSA_new();
-            if (local->rsa == NULL) {
-                wolfSSL_EVP_PKEY_free(local);
-                return NULL;
-            }
             opt = priv ? WOLFSSL_RSA_LOAD_PRIVATE : WOLFSSL_RSA_LOAD_PUBLIC;
-            if (wolfSSL_RSA_LoadDer_ex(local->rsa,
-                      (const unsigned char*)local->pkey.ptr, local->pkey_sz,
-                      opt) != WOLFSSL_SUCCESS) {
+            local->ownRsa = 1;
+            local->rsa = wolfssl_rsa_d2i(NULL,
+                (const unsigned char*)local->pkey.ptr, local->pkey_sz, opt);
+            if (local->rsa == NULL) {
                 wolfSSL_EVP_PKEY_free(local);
                 return NULL;
             }
@@ -12728,6 +12995,10 @@ int wolfSSL_DTLS_SetCookieSecret(WOLFSSL* ssl,
                 WOLFSSL_ERROR(ssl->error);
                 return WOLFSSL_FATAL_ERROR;
             }
+#ifdef WOLFSSL_DTLS13
+            if (ssl->options.dtls)
+                ssl->dtls13SendingAckOrRtx = 0;
+#endif /* WOLFSSL_DTLS13 */
         }
 
         ret = RetrySendAlert(ssl);
@@ -13270,6 +13541,10 @@ int wolfSSL_DTLS_SetCookieSecret(WOLFSSL* ssl,
                 WOLFSSL_ERROR(ssl->error);
                 return WOLFSSL_FATAL_ERROR;
             }
+#ifdef WOLFSSL_DTLS13
+            if (ssl->options.dtls)
+                ssl->dtls13SendingAckOrRtx = 0;
+#endif /* WOLFSSL_DTLS13 */
         }
 
         ret = RetrySendAlert(ssl);
@@ -13876,6 +14151,40 @@ static int SslSessionCacheOff(const WOLFSSL* ssl, const WOLFSSL_SESSION* session
                 ;
 }
 
+#if defined(HAVE_SESSION_TICKET) && defined(WOLFSSL_TLS13) &&                  \
+    defined(WOLFSSL_TICKET_NONCE_MALLOC) && \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+/**
+ * SessionTicketNoncePrealloc() - prealloc a buffer for ticket nonces
+ * @output: [in] pointer to WOLFSSL_SESSION object that will soon be a
+ * destination of a session duplication
+ * @buf: [out] address of the preallocated buf
+ * @len: [out] len of the preallocated buf
+ *
+ * prealloc a buffer that will likely suffice to contain a ticket nonce. It's
+ * used when copying session under lock, when syscalls need to be avoided. If
+ * output already has a dynamic buffer, it's reused.
+ */
+static int SessionTicketNoncePrealloc(byte** buf, byte* len, void *heap)
+{
+    (void)heap;
+
+    *buf = (byte*)XMALLOC(PREALLOC_SESSION_TICKET_NONCE_LEN, heap,
+        DYNAMIC_TYPE_SESSION_TICK);
+    if (*buf == NULL) {
+        WOLFSSL_MSG("Failed to preallocate ticket nonce buffer");
+        *len = 0;
+        return WOLFSSL_FAILURE;
+    }
+
+    *len = PREALLOC_SESSION_TICKET_NONCE_LEN;
+    return 0;
+}
+#endif /* HAVE_SESSION_TICKET && WOLFSSL_TLS13 */
+
+static int wolfSSL_DupSessionEx(const WOLFSSL_SESSION* input,
+    WOLFSSL_SESSION* output, int avoidSysCalls, byte* ticketNonceBuf,
+    byte* ticketNonceLen, byte* preallocUsed);
 
 int wolfSSL_GetSessionFromCache(WOLFSSL* ssl, WOLFSSL_SESSION* output)
 {
@@ -13892,6 +14201,11 @@ int wolfSSL_GetSessionFromCache(WOLFSSL* ssl, WOLFSSL_SESSION* output)
 #else
     byte*        tmpTicket = NULL;
 #endif
+#ifdef WOLFSSL_TLS13
+    byte *preallocNonce = NULL;
+    byte preallocNonceLen = 0;
+    byte preallocNonceUsed = 0;
+#endif /* WOLFSSL_TLS13 */
     byte         tmpBufSet = 0;
 #endif
 #if defined(SESSION_CERTS) && defined(OPENSSL_EXTRA)
@@ -13939,7 +14253,12 @@ int wolfSSL_GetSessionFromCache(WOLFSSL* ssl, WOLFSSL_SESSION* output)
         /* Attempt to retrieve the session from the external cache. */
         WOLFSSL_MSG("Calling external session cache");
         sess = ssl->ctx->get_sess_cb(ssl, (byte*)id, ID_LEN, &copy);
-        if (sess != NULL) {
+        if ((sess != NULL)
+        #if defined(WOLFSSL_TLS13) && defined(HAVE_SESSION_TICKET)
+            && (IsAtLeastTLSv1_3(ssl->version) ==
+                IsAtLeastTLSv1_3(sess->version))
+        #endif
+            ) {
             WOLFSSL_MSG("Session found in external cache");
             error = wolfSSL_DupSession(sess, output, 0);
 #ifdef HAVE_EX_DATA
@@ -13999,6 +14318,30 @@ int wolfSSL_GetSessionFromCache(WOLFSSL* ssl, WOLFSSL_SESSION* output)
     }
 #endif
 
+#if defined(WOLFSSL_TLS13) && defined(HAVE_SESSION_TICKET) &&                  \
+    defined(WOLFSSL_TICKET_NONCE_MALLOC) &&                                    \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    if (output->ticketNonce.data != output->ticketNonce.dataStatic) {
+        XFREE(output->ticketNonce.data, output->heap,
+            DYNAMIC_TYPE_SESSION_TICK);
+        output->ticketNonce.data = output->ticketNonce.dataStatic;
+        output->ticketNonce.len = 0;
+    }
+    error = SessionTicketNoncePrealloc(&preallocNonce, &preallocNonceLen,
+        output->heap);
+    if (error != 0) {
+        if (tmpBufSet) {
+            output->ticket = output->staticTicket;
+            output->ticketLenAlloc = 0;
+        }
+#ifdef WOLFSSL_SMALL_STACK
+        if (tmpTicket != NULL)
+            XFREE(tmpTicket, output->heap, DYNAMIC_TYPE_TMP_BUFFER);
+#endif
+        return WOLFSSL_FAILURE;
+    }
+#endif /* WOLFSSL_TLS13 && HAVE_SESSION_TICKET*/
+
     /* lock row */
     sessRow = &SessionCache[row];
     if (SESSION_ROW_LOCK(sessRow) != 0) {
@@ -14008,6 +14351,10 @@ int wolfSSL_GetSessionFromCache(WOLFSSL* ssl, WOLFSSL_SESSION* output)
             output->ticket = output->staticTicket;
             output->ticketLenAlloc = 0;
         }
+#ifdef WOLFSSL_TLS13
+        if (preallocNonce != NULL)
+            XFREE(preallocNonce, output->heap, DYNAMIC_TYPE_SESSION_TICK);
+#endif /* WOLFSSL_TLS13 */
 #ifdef WOLFSSL_SMALL_STACK
         if (tmpTicket != NULL)
             XFREE(tmpTicket, output->heap, DYNAMIC_TYPE_TMP_BUFFER);
@@ -14027,8 +14374,13 @@ int wolfSSL_GetSessionFromCache(WOLFSSL* ssl, WOLFSSL_SESSION* output)
         WOLFSSL_SESSION* current;
 
         current = &sessRow->Sessions[idx];
-        if (XMEMCMP(current->sessionID, id, ID_LEN) == 0 &&
-                current->side == ssl->options.side) {
+        if (XMEMCMP(current->sessionID, id, ID_LEN) == 0
+                && current->side == ssl->options.side
+        #if defined(WOLFSSL_TLS13) && defined(HAVE_SESSION_TICKET)
+                && (IsAtLeastTLSv1_3(ssl->version) ==
+                    IsAtLeastTLSv1_3(current->version))
+        #endif
+            ) {
             WOLFSSL_MSG("Found a session match");
             if (LowResTimer() < (current->bornOn + current->timeout)) {
                 WOLFSSL_MSG("Session valid");
@@ -14052,7 +14404,13 @@ int wolfSSL_GetSessionFromCache(WOLFSSL* ssl, WOLFSSL_SESSION* output)
             sess->peer = NULL;
         }
 #endif
+#if defined(HAVE_SESSION_TICKET) && defined(WOLFSSL_TLS13)
+        error = wolfSSL_DupSessionEx(sess, output, 1,
+            preallocNonce, &preallocNonceLen, &preallocNonceUsed);
+#else
         error = wolfSSL_DupSession(sess, output, 1);
+#endif /* WOLFSSL_TSL */
+
 #ifdef HAVE_EX_DATA
         output->ownExData = 0; /* Session cache owns external data */
 #endif
@@ -14101,6 +14459,45 @@ int wolfSSL_GetSessionFromCache(WOLFSSL* ssl, WOLFSSL_SESSION* output)
     if (tmpTicket != NULL)
         XFREE(tmpTicket, output->heap, DYNAMIC_TYPE_TMP_BUFFER);
 #endif
+
+#if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKET_NONCE_MALLOC) &&          \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    if (error == WOLFSSL_SUCCESS && preallocNonceUsed) {
+        if (preallocNonceLen < PREALLOC_SESSION_TICKET_NONCE_LEN) {
+            /* buffer bigger than needed */
+#ifndef XREALLOC
+            output->ticketNonce.data = (byte*)XMALLOC(preallocNonceLen,
+                output->heap, DYNAMIC_TYPE_SESSION_TICK);
+            if (output->ticketNonce.data != NULL)
+                XMEMCPY(output->ticketNonce.data, preallocNonce,
+                    preallocNonceLen);
+            XFREE(preallocNonce, output->heap, DYNAMIC_TYPE_SESSION_TICK);
+            preallocNonce = NULL;
+#else
+            output->ticketNonce.data = XREALLOC(preallocNonce,
+                preallocNonceLen, output->heap, DYNAMIC_TYPE_SESSION_TICK);
+            if (output->ticketNonce.data != NULL) {
+                /* don't free the reallocated pointer */
+                preallocNonce = NULL;
+            }
+#endif /* !XREALLOC */
+            if (output->ticketNonce.data == NULL) {
+                output->ticketNonce.data = output->ticketNonce.dataStatic;
+                output->ticketNonce.len = 0;
+                error = WOLFSSL_FAILURE;
+                /* preallocNonce will be free'd after the if */
+            }
+        }
+        else {
+            output->ticketNonce.data = preallocNonce;
+            output->ticketNonce.len = preallocNonceLen;
+            preallocNonce = NULL;
+        }
+    }
+    if (preallocNonce != NULL)
+        XFREE(preallocNonce, output->heap, DYNAMIC_TYPE_SESSION_TICK);
+#endif /* WOLFSSL_TLS13 && WOLFSSL_TICKET_NONCE_MALLOC && FIPS_VERSION_GE(5,3)*/
+
 #endif
 
 #if defined(SESSION_CERTS) && defined(OPENSSL_EXTRA)
@@ -14412,7 +14809,14 @@ int AddSessionToCache(WOLFSSL_CTX* ctx, WOLFSSL_SESSION* addSession,
     byte   ticBuffUsed = 0;
     byte*  ticBuff = NULL;
     int    ticLen  = 0;
-#endif
+#if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKET_NONCE_MALLOC) &&          \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    byte *preallocNonce = NULL;
+    byte preallocNonceLen = 0;
+    byte preallocNonceUsed = 0;
+    byte *toFree = NULL;
+#endif /* WOLFSSL_TLS13 && WOLFSSL_TICKET_NONCE_MALLOC */
+#endif /* HAVE_SESSION_TICKET */
     int ret = 0;
     int row;
     int i;
@@ -14434,7 +14838,6 @@ int AddSessionToCache(WOLFSSL_CTX* ctx, WOLFSSL_SESSION* addSession,
         return MEMORY_E;
     }
 
-    /* Find a position for the new session in cache and use that */
 #ifdef HAVE_SESSION_TICKET
     ticLen = addSession->ticketLen;
     /* Alloc Memory here to avoid syscalls during lock */
@@ -14445,13 +14848,35 @@ int AddSessionToCache(WOLFSSL_CTX* ctx, WOLFSSL_SESSION* addSession,
             return MEMORY_E;
         }
     }
-#endif
+#if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKET_NONCE_MALLOC) &&          \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    if (addSession->ticketNonce.data != addSession->ticketNonce.dataStatic) {
+        /* use the AddSession->heap even if the buffer maybe saved in
+         * CachedSession objects. CachedSession heap and AddSession heap should
+         * be the same */
+        preallocNonce = (byte*)XMALLOC(addSession->ticketNonce.len,
+            addSession->heap, DYNAMIC_TYPE_SESSION_TICK);
+        if (preallocNonce == NULL) {
+            if (ticBuff != NULL)
+                XFREE(ticBuff, addSession->heap, DYNAMIC_TYPE_SESSION_TICK);
+            return MEMORY_E;
+        }
+        preallocNonceLen = addSession->ticketNonce.len;
+    }
+#endif /* WOLFSSL_TLS13 && WOLFSL_TICKET_NONCE_MALLOC && FIPS_VERSION_GE(5,3) */
+#endif /* HAVE_SESSION_TICKET */
+
+    /* Find a position for the new session in cache and use that */
     /* Use the session object in the cache for external cache if required */
     row = (int)(HashObject(id, ID_LEN, &ret) % SESSION_ROWS);
     if (ret != 0) {
         WOLFSSL_MSG("Hash session failed");
     #ifdef HAVE_SESSION_TICKET
         XFREE(ticBuff, NULL, DYNAMIC_TYPE_SESSION_TICK);
+    #if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKE_NONCE_MALLOC)
+        if (preallocNonce != NULL)
+            XFREE(preallocNonce, addSession->heap, DYNAMIC_TYPE_SESSION_TICK);
+    #endif
     #endif
         return ret;
     }
@@ -14460,6 +14885,10 @@ int AddSessionToCache(WOLFSSL_CTX* ctx, WOLFSSL_SESSION* addSession,
     if (SESSION_ROW_LOCK(sessRow) != 0) {
     #ifdef HAVE_SESSION_TICKET
         XFREE(ticBuff, NULL, DYNAMIC_TYPE_SESSION_TICK);
+    #if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKE_NONCE_MALLOC)
+        if (preallocNonce != NULL)
+            XFREE(preallocNonce, addSession->heap, DYNAMIC_TYPE_SESSION_TICK);
+    #endif
     #endif
         WOLFSSL_MSG("Session row lock failed");
         return BAD_MUTEX_E;
@@ -14514,6 +14943,19 @@ int AddSessionToCache(WOLFSSL_CTX* ctx, WOLFSSL_SESSION* addSession,
         cacheSession->ticket = ticBuff;
         cacheSession->ticketLenAlloc = (word16) ticLen;
     }
+#if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKET_NONCE_MALLOC) &&          \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    /* cache entry never used */
+    if (cacheSession->ticketNonce.data == NULL)
+        cacheSession->ticketNonce.data = cacheSession->ticketNonce.dataStatic;
+
+    if (cacheSession->ticketNonce.data !=
+            cacheSession->ticketNonce.dataStatic) {
+        toFree = cacheSession->ticketNonce.data;
+        cacheSession->ticketNonce.data = cacheSession->ticketNonce.dataStatic;
+        cacheSession->ticketNonce.len = 0;
+    }
+#endif /* WOFLSSL_TLS13 && WOLFSSL_TICKET_NONCE_MALLOC && FIPS_VERSION_GE(5,3)*/
 #endif
 #ifdef SESSION_CERTS
     if (overwrite &&
@@ -14527,7 +14969,15 @@ int AddSessionToCache(WOLFSSL_CTX* ctx, WOLFSSL_SESSION* addSession,
 #endif /* SESSION_CERTS */
     cacheSession->heap = NULL;
     /* Copy data into the cache object */
+#if defined(HAVE_SESSION_TICKET) && defined(WOLFSSL_TLS13) &&                  \
+    defined(WOLFSSL_TICKET_NONCE_MALLOC) &&                                   \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    ret = wolfSSL_DupSessionEx(addSession, cacheSession, 1, preallocNonce,
+        &preallocNonceLen, &preallocNonceUsed) == WOLFSSL_FAILURE;
+#else
     ret = wolfSSL_DupSession(addSession, cacheSession, 1) == WOLFSSL_FAILURE;
+#endif /* HAVE_SESSION_TICKET && WOLFSSL_TLS13 && WOLFSSL_TICKET_NONCE_MALLOC
+          && FIPS_VERSION_GE(5,3)*/
 
     if (ret == 0) {
         /* Increment the totalCount and the nextIdx */
@@ -14547,6 +14997,17 @@ int AddSessionToCache(WOLFSSL_CTX* ctx, WOLFSSL_SESSION* addSession,
             cacheSession->rem_sess_cb = ctx->rem_sess_cb;
         }
 #endif
+#if defined(HAVE_SESSION_TICKET) && defined(WOLFSSL_TLS13) &&                  \
+    defined(WOLFSSL_TICKET_NONCE_MALLOC) &&                                    \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+        if (preallocNonce != NULL && preallocNonceUsed) {
+            cacheSession->ticketNonce.data = preallocNonce;
+            cacheSession->ticketNonce.len = preallocNonceLen;
+            preallocNonce = NULL;
+            preallocNonceLen = 0;
+        }
+#endif /* HAVE_SESSION_TICKET && WOLFSSL_TLS13 && WOLFSSL_TICKET_NONCE_MALLOC
+        * && FIPS_VERSION_GE(5,3)*/
     }
 #ifdef HAVE_SESSION_TICKET
     else if (ticBuffUsed) {
@@ -14574,6 +15035,13 @@ int AddSessionToCache(WOLFSSL_CTX* ctx, WOLFSSL_SESSION* addSession,
         XFREE(ticBuff, NULL, DYNAMIC_TYPE_SESSION_TICK);
     if (cacheTicBuff != NULL)
         XFREE(cacheTicBuff, NULL, DYNAMIC_TYPE_SESSION_TICK);
+#if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKET_NONCE_MALLOC) &&         \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    if (preallocNonce != NULL)
+        XFREE(preallocNonce, addSession->heap, DYNAMIC_TYPE_SESSION_TICK);
+    if (toFree != NULL)
+        XFREE(toFree, addSession->heap, DYNAMIC_TYPE_SESSION_TICK);
+#endif /* WOLFSSL_TLS13 && WOLFSSL_TICKET_NONCE_MALLOC && FIPS_VERSION_GE(5,3)*/
 #endif
 
 #if defined(SESSION_CERTS) && defined(OPENSSL_EXTRA)
@@ -15121,29 +15589,29 @@ int wolfSSL_set_compression(WOLFSSL* ssl)
 
     #define AddTimes(a, b, c)                       \
         do {                                        \
-            c.tv_sec  = a.tv_sec  + b.tv_sec;       \
-            c.tv_usec = a.tv_usec + b.tv_usec;      \
-            if (c.tv_usec >=  1000000) {            \
-                c.tv_sec++;                         \
-                c.tv_usec -= 1000000;               \
+            (c).tv_sec  = (a).tv_sec + (b).tv_sec;  \
+            (c).tv_usec = (a).tv_usec + (b).tv_usec;\
+            if ((c).tv_usec >=  1000000) {          \
+                (c).tv_sec++;                       \
+                (c).tv_usec -= 1000000;             \
             }                                       \
         } while (0)
 
 
     #define SubtractTimes(a, b, c)                  \
         do {                                        \
-            c.tv_sec  = a.tv_sec  - b.tv_sec;       \
-            c.tv_usec = a.tv_usec - b.tv_usec;      \
-            if (c.tv_usec < 0) {                    \
-                c.tv_sec--;                         \
-                c.tv_usec += 1000000;               \
+            (c).tv_sec  = (a).tv_sec - (b).tv_sec;  \
+            (c).tv_usec = (a).tv_usec - (b).tv_usec;\
+            if ((c).tv_usec < 0) {                  \
+                (c).tv_sec--;                       \
+                (c).tv_usec += 1000000;             \
             }                                       \
         } while (0)
 
     #define CmpTimes(a, b, cmp)                     \
-        ((a.tv_sec  ==  b.tv_sec) ?                 \
-            (a.tv_usec cmp b.tv_usec) :             \
-            (a.tv_sec  cmp b.tv_sec))               \
+        (((a).tv_sec  ==  (b).tv_sec) ?             \
+            ((a).tv_usec cmp (b).tv_usec) :         \
+            ((a).tv_sec  cmp (b).tv_sec))           \
 
 
     /* do nothing handler */
@@ -15226,7 +15694,8 @@ int wolfSSL_set_compression(WOLFSSL* ssl)
         /* do callbacks */
         if (toCb) {
             if (oldTimerOn) {
-                gettimeofday(&endTime, 0);
+                if (gettimeofday(&endTime, 0) < 0)
+                    ERR_OUT(SYSLIB_FAILED_E);
                 SubtractTimes(endTime, startTime, totalTime);
                 /* adjust old timer for elapsed time */
                 if (CmpTimes(totalTime, oldTimeout.it_value, <))
@@ -15986,7 +16455,8 @@ int wolfSSL_set_compression(WOLFSSL* ssl)
 
 #endif
 
-#if defined(OPENSSL_EXTRA) || defined(WOLFSSL_EXTRA) || defined(WOLFSSL_WPAS_SMALL)
+#if defined(OPENSSL_EXTRA) || defined(OPENSSL_EXTRA_X509_SMALL) || \
+    defined(WOLFSSL_EXTRA) || defined(WOLFSSL_WPAS_SMALL)
     void wolfSSL_CTX_set_quiet_shutdown(WOLFSSL_CTX* ctx, int mode)
     {
         WOLFSSL_ENTER("wolfSSL_CTX_set_quiet_shutdown");
@@ -16001,7 +16471,8 @@ int wolfSSL_set_compression(WOLFSSL* ssl)
         if (mode)
             ssl->options.quietShutdown = 1;
     }
-#endif /* OPENSSL_EXTRA || WOLFSSL_EXTRA || WOLFSSL_WPAS_SMALL */
+#endif /* OPENSSL_EXTRA || OPENSSL_EXTRA_X509_SMALL ||
+          WOLFSSL_EXTRA || WOLFSSL_WPAS_SMALL */
 
 #ifdef OPENSSL_EXTRA
 #ifndef NO_BIO
@@ -16280,15 +16751,35 @@ cleanup:
 
 #ifdef OPENSSL_EXTRA
 
-    #ifndef NO_WOLFSSL_STUB
+    #ifdef WOLFSSL_SYS_CA_CERTS
+    /*
+     * This is an OpenSSL compatibility layer function, but it doesn't mirror
+     * the exact functionality of its OpenSSL counterpart. We don't support the
+     * notion of an "OpenSSL directory," nor do we support the environment
+     * variables SSL_CERT_DIR or SSL_CERT_FILE. This function is simply a
+     * wrapper around our native wolfSSL_CTX_load_system_CA_certs function. This
+     * function does conform to OpenSSL's return value conventions, though.
+     */
     int wolfSSL_CTX_set_default_verify_paths(WOLFSSL_CTX* ctx)
     {
-        /* TODO:, not needed in goahead */
-        (void)ctx;
-        WOLFSSL_STUB("SSL_CTX_set_default_verify_paths");
-        return SSL_NOT_IMPLEMENTED;
+        int ret;
+
+        WOLFSSL_ENTER("wolfSSL_CTX_set_default_verify_paths");
+
+        ret = wolfSSL_CTX_load_system_CA_certs(ctx);
+        if (ret == WOLFSSL_BAD_PATH) {
+            /*
+             * OpenSSL doesn't treat the lack of a system CA cert directory as a
+             * failure. We do the same here.
+             */
+            ret = WOLFSSL_SUCCESS;
+        }
+
+        WOLFSSL_LEAVE("wolfSSL_CTX_set_default_verify_paths", ret);
+
+        return ret;
     }
-    #endif
+    #endif /* WOLFSSL_SYS_CA_CERTS */
 
     #if defined(WOLFCRYPT_HAVE_SRP) && !defined(NO_SHA256) \
         && !defined(WC_NO_RNG)
@@ -19522,7 +20013,7 @@ WOLF_STACK_OF(WOLFSSL_X509)* wolfSSL_set_peer_cert_chain(WOLFSSL* ssl)
     if ((ssl == NULL) || (ssl->session->chain.count == 0))
         return NULL;
 
-    sk = wolfSSL_sk_X509_new();
+    sk = wolfSSL_sk_X509_new_null();
     i = ssl->session->chain.count-1;
     for (; i >= 0; i--) {
         x509 = wolfSSL_X509_new();
@@ -19559,7 +20050,7 @@ WOLF_STACK_OF(WOLFSSL_X509)* wolfSSL_set_peer_cert_chain(WOLFSSL* ssl)
     else if (ssl->options.side == WOLFSSL_SERVER_END) {
         /* to be compliant with openssl
            first element is kept as peer cert on server side.*/
-        wolfSSL_sk_X509_shift(sk);
+        wolfSSL_sk_X509_pop(sk);
     }
 #endif
     if (ssl->peerCertChain != NULL)
@@ -20345,6 +20836,10 @@ WOLFSSL_SESSION* wolfSSL_NewSession(void* heap)
 #endif
     #ifdef HAVE_SESSION_TICKET
         ret->ticket = ret->staticTicket;
+        #if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKET_NONCE_MALLOC) &&  \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+        ret->ticketNonce.data = ret->ticketNonce.dataStatic;
+        #endif
     #endif
 #ifdef HAVE_STUNNEL
         /* stunnel has this funny mechanism of storing the "is_authenticated"
@@ -20407,11 +20902,16 @@ int wolfSSL_SESSION_up_ref(WOLFSSL_SESSION* session)
  *                      sessions from cache. When a cache row is locked, we
  *                      don't want to block other threads with long running
  *                      system calls.
+ * @param ticketNonceBuf If not null and @avoidSysCalls is true, the copy of the
+ *                      ticketNonce will happen in this pre allocated buffer
+ * @param ticketNonceLen @ticketNonceBuf len as input, used length on output
+ * @param ticketNonceUsed if @ticketNonceBuf was used to copy the ticket noncet
  * @return              WOLFSSL_SUCCESS on success
  *                      WOLFSSL_FAILURE on failure
  */
-int wolfSSL_DupSession(const WOLFSSL_SESSION* input, WOLFSSL_SESSION* output,
-        int avoidSysCalls)
+static int wolfSSL_DupSessionEx(const WOLFSSL_SESSION* input,
+    WOLFSSL_SESSION* output, int avoidSysCalls, byte* ticketNonceBuf,
+    byte* ticketNonceLen, byte* preallocUsed)
 {
 #ifdef HAVE_SESSION_TICKET
     int   ticLenAlloc = 0;
@@ -20421,6 +20921,9 @@ int wolfSSL_DupSession(const WOLFSSL_SESSION* input, WOLFSSL_SESSION* output,
     int ret = WOLFSSL_SUCCESS;
 
     (void)avoidSysCalls;
+    (void)ticketNonceBuf;
+    (void)ticketNonceLen;
+    (void)preallocUsed;
 
     input = ClientSessionToSession(input);
     output = ClientSessionToSession(output);
@@ -20435,7 +20938,27 @@ int wolfSSL_DupSession(const WOLFSSL_SESSION* input, WOLFSSL_SESSION* output,
         ticBuff = output->ticket;
         ticLenAlloc = output->ticketLenAlloc;
     }
-#endif
+#if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKET_NONCE_MALLOC) &&          \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+        /* free the data, it would be better to re-use the buffer but this
+         * maintain the code simpler. A smart allocator should re-use the free'd
+         * buffer in the next malloc without much performance penalties. */
+    if (output->ticketNonce.data != output->ticketNonce.dataStatic) {
+
+        /*  Callers that avoid syscall should never calls this with
+         * output->tickeNonce.data being a dynamic buffer.*/
+        if (avoidSysCalls) {
+            WOLFSSL_MSG("can't avoid syscalls with dynamic TicketNonce buffer");
+            return WOLFSSL_FAILURE;
+        }
+
+        XFREE(output->ticketNonce.data,
+            output->heap, DYNAMIC_TYPE_SESSION_TICK);
+        output->ticketNonce.data = output->ticketNonce.dataStatic;
+        output->ticketNonce.len = 0;
+    }
+#endif /* WOLFSSL_TLS13 && WOLFSSL_TICKET_NONCE_MALLOC && FIPS_VERSION_GE(5,3)*/
+#endif /* HAVE_SESSION_TICKET */
 
 #if defined(SESSION_CERTS) && defined(OPENSSL_EXTRA)
     if (output->peer != NULL) {
@@ -20451,6 +20974,12 @@ int wolfSSL_DupSession(const WOLFSSL_SESSION* input, WOLFSSL_SESSION* output,
     XMEMCPY((byte*)output + copyOffset, (byte*)input + copyOffset,
             sizeof(WOLFSSL_SESSION) - copyOffset);
 
+#if defined(HAVE_SESSION_TICKET) && defined(WOLFSSL_TLS13) &&                  \
+    defined(WOLFSSL_TICKET_NONCE_MALLOC) &&                                    \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    /* fix pointer to static after the copy  */
+    output->ticketNonce.data = output->ticketNonce.dataStatic;
+#endif
     /* Set sane values for copy */
 #ifndef NO_SESSION_CACHE
     if (output->type != WOLFSSL_SESSION_TYPE_CACHE)
@@ -20544,8 +21073,72 @@ int wolfSSL_DupSession(const WOLFSSL_SESSION* input, WOLFSSL_SESSION* output,
         }
     }
     ticBuff = NULL;
+
+#if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKET_NONCE_MALLOC) &&          \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    if (preallocUsed != NULL)
+        *preallocUsed = 0;
+
+    if (input->ticketNonce.len > MAX_TICKET_NONCE_STATIC_SZ &&
+        ret == WOLFSSL_SUCCESS) {
+        /* TicketNonce does not fit in the static buffer */
+        if (!avoidSysCalls) {
+            output->ticketNonce.data = (byte*)XMALLOC(input->ticketNonce.len,
+                output->heap, DYNAMIC_TYPE_SESSION_TICK);
+
+            if (output->ticketNonce.data == NULL) {
+                WOLFSSL_MSG("Failed to allocate space for ticket nonce");
+                output->ticketNonce.data = output->ticketNonce.dataStatic;
+                output->ticketNonce.len = 0;
+                ret = WOLFSSL_FAILURE;
+            }
+            else {
+                output->ticketNonce.len = input->ticketNonce.len;
+                XMEMCPY(output->ticketNonce.data, input->ticketNonce.data,
+                    input->ticketNonce.len);
+                ret = WOLFSSL_SUCCESS;
+            }
+        }
+        /* we can't do syscalls. Use prealloc buffers if provided from the
+         * caller. */
+        else if (ticketNonceBuf != NULL &&
+                 *ticketNonceLen >= input->ticketNonce.len) {
+            XMEMCPY(ticketNonceBuf, input->ticketNonce.data,
+                input->ticketNonce.len);
+            *ticketNonceLen = input->ticketNonce.len;
+            if (preallocUsed != NULL)
+                *preallocUsed = 1;
+            ret = WOLFSSL_SUCCESS;
+        }
+        else {
+            WOLFSSL_MSG("TicketNonce bigger than static buffer, and we can't "
+                        "do syscalls");
+            ret = WOLFSSL_FAILURE;
+        }
+    }
+#endif /* WOLFSSL_TLS13 && WOLFSSL_TICKET_NONCE_MALLOC && FIPS_VERSION_GE(5,3)*/
+
 #endif /* HAVE_SESSION_TICKET */
     return ret;
+}
+
+/**
+ * Deep copy the contents from input to output.
+ * @param input         The source of the copy.
+ * @param output        The destination of the copy.
+ * @param avoidSysCalls If true, then system calls will be avoided or an error
+ *                      will be returned if it is not possible to proceed
+ *                      without a system call. This is useful for fetching
+ *                      sessions from cache. When a cache row is locked, we
+ *                      don't want to block other threads with long running
+ *                      system calls.
+ * @return              WOLFSSL_SUCCESS on success
+ *                      WOLFSSL_FAILURE on failure
+ */
+int wolfSSL_DupSession(const WOLFSSL_SESSION* input, WOLFSSL_SESSION* output,
+        int avoidSysCalls)
+{
+    return wolfSSL_DupSessionEx(input, output, avoidSysCalls, NULL, NULL, NULL);
 }
 
 WOLFSSL_SESSION* wolfSSL_SESSION_dup(WOLFSSL_SESSION* session)
@@ -20637,6 +21230,13 @@ void wolfSSL_FreeSession(WOLFSSL_CTX* ctx, WOLFSSL_SESSION* session)
     if (session->ticketLenAlloc > 0) {
         XFREE(session->ticket, session->heap, DYNAMIC_TYPE_SESSION_TICK);
     }
+#if defined(WOLFSSL_TLS13) && defined(WOLFSSL_TICKET_NONCE_MALLOC) &&          \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    if (session->ticketNonce.data != session->ticketNonce.dataStatic) {
+        XFREE(session->ticketNonce.data, session->heap,
+            DYNAMIC_TYPE_SESSION_TICK);
+    }
+#endif /* WOLFSSL_TLS13 && WOLFSSL_TICKET_NONCE_MALLOC && FIPS_VERSION_GE(5,3)*/
 #endif
 
 #ifdef HAVE_EX_DATA_CLEANUP_HOOKS
@@ -22141,6 +22741,17 @@ int wolfSSL_i2d_PublicKey(const WOLFSSL_EVP_PKEY *key, unsigned char **der)
 #endif /* OPENSSL_EXTRA */
 
 #ifdef OPENSSL_EXTRA
+
+/* Sets the DNS hostname to name.
+ * Hostname is cleared if name is NULL or empty. */
+int wolfSSL_set1_host(WOLFSSL * ssl, const char* name)
+{
+    if (ssl == NULL) {
+        return WOLFSSL_FAILURE;
+    }
+
+    return wolfSSL_X509_VERIFY_PARAM_set1_host(ssl->param, name, 0);
+}
 
 /******************************************************************************
 * wolfSSL_CTX_set1_param - set a pointer to the SSL verification parameters
@@ -26085,7 +26696,19 @@ WOLFSSL_SESSION* wolfSSL_d2i_SSL_SESSION(WOLFSSL_SESSION** sess,
         ret = BUFFER_ERROR;
         goto end;
     }
+#if defined(WOLFSSL_TICKET_NONCE_MALLOC) &&                     \
+    (!defined(HAVE_FIPS) || (defined(FIPS_VERSION_GE) && FIPS_VERSION_GE(5,3)))
+    ret = SessionTicketNoncePopulate(s, data + idx, s->ticketNonce.len);
+    if (ret != 0)
+        goto end;
+#else
+    if (s->ticketNonce.len > MAX_TICKET_NONCE_STATIC_SZ) {
+        ret = BUFFER_ERROR;
+        goto end;
+    }
     XMEMCPY(s->ticketNonce.data, data + idx, s->ticketNonce.len);
+#endif /* defined(WOLFSSL_TICKET_NONCE_MALLOC) && FIPS_VERSION_GE(5,3) */
+
     idx += s->ticketNonce.len;
 #endif
 #ifdef WOLFSSL_EARLY_DATA
@@ -27887,16 +28510,16 @@ int EncryptDerKey(byte *der, int *derSz, const EVP_CIPHER* cipher,
 }
 #endif /* WOLFSSL_KEY_GEN || WOLFSSL_PEM_TO_DER */
 
-#ifndef NO_BIO
-static int pem_write_bio_pubkey(WOLFSSL_BIO* bio, WOLFSSL_EVP_PKEY* key)
+#if !defined(NO_BIO)
+static int pem_write_pubkey(WOLFSSL_EVP_PKEY* key, void* heap, byte** derBuf,
+    int* derSz)
 {
-    int ret;
-    int pemSz;
-    byte* pemBuf;
-    int derSz = 0;
-    byte* derBuf = NULL;
+    byte* buf = NULL;
+    int sz = 0;
 
-    if (bio == NULL || key == NULL) {
+    (void)heap;
+
+    if (key == NULL) {
         WOLFSSL_MSG("Bad parameters");
         return WOLFSSL_FAILURE;
     }
@@ -27904,7 +28527,7 @@ static int pem_write_bio_pubkey(WOLFSSL_BIO* bio, WOLFSSL_EVP_PKEY* key)
     switch (key->type) {
 #if defined(WOLFSSL_KEY_GEN) && !defined(NO_RSA) && !defined(HAVE_USER_RSA)
         case EVP_PKEY_RSA:
-            if ((derSz = wolfSSL_RSA_To_Der(key->rsa, &derBuf, 1, bio->heap))
+            if ((sz = wolfSSL_RSA_To_Der(key->rsa, &buf, 1, heap))
                     < 0) {
                 WOLFSSL_MSG("wolfSSL_RSA_To_Der failed");
                 break;
@@ -27918,16 +28541,15 @@ static int pem_write_bio_pubkey(WOLFSSL_BIO* bio, WOLFSSL_EVP_PKEY* key)
                 WOLFSSL_MSG("key->dsa is null");
                 break;
             }
-            derSz = MAX_DSA_PUBKEY_SZ;
-            derBuf = (byte*)XMALLOC(derSz, bio->heap, DYNAMIC_TYPE_TMP_BUFFER);
-            if (derBuf == NULL) {
+            sz = MAX_DSA_PUBKEY_SZ;
+            buf = (byte*)XMALLOC(sz, heap, DYNAMIC_TYPE_TMP_BUFFER);
+            if (buf == NULL) {
                 WOLFSSL_MSG("malloc failed");
                 break;
             }
             /* Key to DER */
-            derSz = wc_DsaKeyToPublicDer((DsaKey*)key->dsa->internal, derBuf,
-                    derSz);
-            if (derSz < 0) {
+            sz = wc_DsaKeyToPublicDer((DsaKey*)key->dsa->internal, buf, sz);
+            if (sz < 0) {
                 WOLFSSL_MSG("wc_DsaKeyToDer failed");
                 break;
             }
@@ -27940,19 +28562,18 @@ static int pem_write_bio_pubkey(WOLFSSL_BIO* bio, WOLFSSL_EVP_PKEY* key)
                 WOLFSSL_MSG("key->ecc is null");
                 break;
             }
-            derSz = wc_EccPublicKeyDerSize((ecc_key*)key->ecc->internal, 1);
-            if (derSz <= 0) {
+            sz = wc_EccPublicKeyDerSize((ecc_key*)key->ecc->internal, 1);
+            if (sz <= 0) {
                 WOLFSSL_MSG("wc_EccPublicKeyDerSize failed");
                 break;
             }
-            derBuf = (byte*)XMALLOC(derSz, bio->heap, DYNAMIC_TYPE_TMP_BUFFER);
-            if (derBuf == NULL) {
+            buf = (byte*)XMALLOC(sz, heap, DYNAMIC_TYPE_TMP_BUFFER);
+            if (buf == NULL) {
                 WOLFSSL_MSG("malloc failed");
                 break;
             }
-            derSz = wc_EccPublicKeyToDer((ecc_key*)key->ecc->internal, derBuf,
-                    derSz, 1);
-            if (derSz < 0) {
+            sz = wc_EccPublicKeyToDer((ecc_key*)key->ecc->internal, buf, sz, 1);
+            if (sz < 0) {
                 WOLFSSL_MSG("wc_EccPublicKeyToDer failed");
                 break;
             }
@@ -27969,42 +28590,32 @@ static int pem_write_bio_pubkey(WOLFSSL_BIO* bio, WOLFSSL_EVP_PKEY* key)
             break;
     }
 
-    if (derBuf == NULL || derSz <= 0) {
-        if (derBuf != NULL)
-            XFREE(derBuf, bio->heap, DYNAMIC_TYPE_DER);
+    if (buf == NULL || sz <= 0) {
+        if (buf != NULL)
+            XFREE(buf, heap, DYNAMIC_TYPE_DER);
         return WOLFSSL_FAILURE;
     }
 
-    pemSz = wc_DerToPem(derBuf, derSz, NULL, 0, PUBLICKEY_TYPE);
-    if (pemSz < 0) {
-        WOLFSSL_LEAVE("pem_write_bio_pubkey", pemSz);
-        XFREE(derBuf, bio->heap, DYNAMIC_TYPE_DER);
-        return WOLFSSL_FAILURE;
-    }
-
-    pemBuf = (byte*)XMALLOC(pemSz, bio->heap, DYNAMIC_TYPE_TMP_BUFFER);
-    if (pemBuf == NULL) {
-        WOLFSSL_LEAVE("pem_write_bio_pubkey", pemSz);
-        XFREE(derBuf, bio->heap, DYNAMIC_TYPE_DER);
-        return WOLFSSL_FAILURE;
-    }
-
-    ret = wc_DerToPem(derBuf, derSz, pemBuf, pemSz, PUBLICKEY_TYPE);
-    XFREE(derBuf, bio->heap, DYNAMIC_TYPE_DER);
-    if (ret < 0) {
-        WOLFSSL_LEAVE("pem_write_bio_pubkey", ret);
-        XFREE(pemBuf, bio->heap, DYNAMIC_TYPE_TMP_BUFFER);
-        return WOLFSSL_FAILURE;
-    }
-
-    ret = wolfSSL_BIO_write(bio, pemBuf, pemSz);
-    XFREE(pemBuf, bio->heap, DYNAMIC_TYPE_TMP_BUFFER);
-    if (ret != pemSz) {
-        WOLFSSL_MSG("Unable to write full PEM to BIO");
-        return WOLFSSL_FAILURE;
-    }
-
+    *derBuf = buf;
+    *derSz = sz;
     return WOLFSSL_SUCCESS;
+}
+#endif
+
+#ifndef NO_BIO
+static int pem_write_bio_pubkey(WOLFSSL_BIO* bio, WOLFSSL_EVP_PKEY* key)
+{
+    int ret;
+    int derSz = 0;
+    byte* derBuf = NULL;
+
+    ret = pem_write_pubkey(key, bio->heap, &derBuf, &derSz);
+    if (ret == WOLFSSL_SUCCESS) {
+        ret = der_write_to_bio_as_pem(derBuf, derSz, bio, PUBLICKEY_TYPE);
+        XFREE(derBuf, bio->heap, DYNAMIC_TYPE_DER);
+    }
+
+    return ret;
 }
 
 /* Takes a public key and writes it out to a WOLFSSL_BIO
@@ -28012,9 +28623,18 @@ static int pem_write_bio_pubkey(WOLFSSL_BIO* bio, WOLFSSL_EVP_PKEY* key)
  */
 int wolfSSL_PEM_write_bio_PUBKEY(WOLFSSL_BIO* bio, WOLFSSL_EVP_PKEY* key)
 {
+    int ret;
+
     WOLFSSL_ENTER("wolfSSL_PEM_write_bio_PUBKEY");
 
-    return pem_write_bio_pubkey(bio, key);
+    if ((bio == NULL) || (key == NULL)) {
+        ret = WOLFSSL_FAILURE;
+    }
+    else {
+        ret = pem_write_bio_pubkey(bio, key);
+    }
+
+    return ret;
 }
 
 /* Takes a private key and writes it out to a WOLFSSL_BIO
@@ -28026,10 +28646,7 @@ int wolfSSL_PEM_write_bio_PrivateKey(WOLFSSL_BIO* bio, WOLFSSL_EVP_PKEY* key,
                                      wc_pem_password_cb* cb, void* arg)
 {
     byte* keyDer;
-    int pemSz;
     int type;
-    int ret;
-    byte* tmp;
 
     (void)cipher;
     (void)passwd;
@@ -28076,31 +28693,7 @@ int wolfSSL_PEM_write_bio_PrivateKey(WOLFSSL_BIO* bio, WOLFSSL_EVP_PKEY* key,
             type = PRIVATEKEY_TYPE;
     }
 
-    pemSz = wc_DerToPem(keyDer, key->pkey_sz, NULL, 0, type);
-    if (pemSz < 0) {
-        WOLFSSL_LEAVE("wolfSSL_PEM_write_bio_PrivateKey", pemSz);
-        return WOLFSSL_FAILURE;
-    }
-    tmp = (byte*)XMALLOC(pemSz, bio->heap, DYNAMIC_TYPE_OPENSSL);
-    if (tmp == NULL) {
-        return MEMORY_E;
-    }
-
-    ret = wc_DerToPem(keyDer, key->pkey_sz, tmp, pemSz, type);
-    if (ret < 0) {
-        WOLFSSL_LEAVE("wolfSSL_PEM_write_bio_PrivateKey", ret);
-        XFREE(tmp, bio->heap, DYNAMIC_TYPE_OPENSSL);
-        return WOLFSSL_FAILURE;
-    }
-
-    ret = wolfSSL_BIO_write(bio, tmp, pemSz);
-    XFREE(tmp, bio->heap, DYNAMIC_TYPE_OPENSSL);
-    if (ret != pemSz) {
-        WOLFSSL_MSG("Unable to write full PEM to BIO");
-        return WOLFSSL_FAILURE;
-    }
-
-    return WOLFSSL_SUCCESS;
+    return der_write_to_bio_as_pem(keyDer, key->pkey_sz, bio, type);
 }
 #endif /* !NO_BIO */
 
@@ -28351,171 +28944,6 @@ int wolfSSL_set1_groups_list(WOLFSSL *ssl, char *list)
 #endif /* HAVE_ECC */
 
 #ifndef NO_BIO
-/* Number of bytes to read from a file at a time. */
-#define PEM_READ_FILE_CHUNK_SZ  100
-
-static int pem_read_bio_file(WOLFSSL_BIO* bio, char** pem)
-{
-    int ret   = 0;
-    int idx   = 0;
-    int sz    = PEM_READ_FILE_CHUNK_SZ; /* read from file by chunks */
-    int memSz = 0;
-    char* mem = NULL;
-    char* tmp;
-
-    /* Allocate a chunk to read into. */
-    tmp = (char*)XMALLOC(sz, bio->heap, DYNAMIC_TYPE_OPENSSL);
-    if (tmp == NULL) {
-        WOLFSSL_MSG("Memory error");
-        ret = MEMORY_E;
-    }
-
-    while (ret == 0 && (sz = wolfSSL_BIO_read(bio, tmp, sz)) > 0) {
-        char* newMem;
-
-        /* sanity check for signed overflow */
-        if (memSz + sz < 0) {
-            break;
-        }
-
-        /* Reallocate to make space for read data. */
-        newMem = (char*)XREALLOC(mem, memSz + sz, bio->heap,
-                DYNAMIC_TYPE_OPENSSL);
-        if (newMem == NULL) {
-            WOLFSSL_MSG("Memory error");
-            ret = MEMORY_E;
-            break;
-        }
-        mem = newMem;
-
-        /* Copy in new data. */
-        XMEMCPY(mem + idx, tmp, sz);
-        memSz += sz;
-        idx   += sz;
-        sz = PEM_READ_FILE_CHUNK_SZ; /* read another chunk from file */
-    }
-
-    XFREE(tmp, bio->heap, DYNAMIC_TYPE_OPENSSL);
-    tmp = NULL;
-
-    if (ret == 0) {
-        /* Check data was read. */
-        if (memSz <= 0) {
-            WOLFSSL_MSG("No data to read from bio");
-            ret = BUFFER_E;
-        }
-        else {
-            /* Return size of data read. */
-            ret = memSz;
-        }
-    }
-    /* Dispose of any allocated memory on error. */
-    if (ret < 0) {
-        XFREE(mem, bio->heap, DYNAMIC_TYPE_OPENSSL);
-        mem = NULL;
-    }
-
-    *pem = mem;
-    return ret;
-}
-
-static int pem_read_bio_pending(WOLFSSL_BIO* bio, int pendingSz, char** pem)
-{
-    int ret = 0;
-    char* mem;
-
-    /* Allocate buffer to hold pending data. */
-    mem = (char*)XMALLOC(pendingSz, bio->heap, DYNAMIC_TYPE_OPENSSL);
-    if (mem == NULL) {
-        WOLFSSL_MSG("Memory error");
-        ret = MEMORY_E;
-    }
-    else if ((ret = wolfSSL_BIO_read(bio, mem, pendingSz)) <= 0) {
-        /* Pending data not read. */
-        XFREE(mem, bio->heap, DYNAMIC_TYPE_OPENSSL);
-        mem = NULL;
-        ret = MEMORY_E;
-    }
-
-    *pem = mem;
-    return ret;
-}
-
-static int pem_read_bio_key(WOLFSSL_BIO* bio, wc_pem_password_cb* cb,
-                            void* pass, int keyType, int* eccFlag,
-                            DerBuffer** der)
-{
-#ifdef WOLFSSL_SMALL_STACK
-    EncryptedInfo* info = NULL;
-#else
-    EncryptedInfo info[1];
-#endif /* WOLFSSL_SMALL_STACK */
-    wc_pem_password_cb* localCb = NULL;
-    char* mem = NULL;
-    int ret;
-
-    if (cb != NULL) {
-        localCb = cb;
-    }
-    else if (pass != NULL) {
-        localCb = wolfSSL_PEM_def_callback;
-    }
-
-    if ((ret = wolfSSL_BIO_pending(bio)) > 0) {
-        ret = pem_read_bio_pending(bio, ret, &mem);
-    }
-    else if (bio->type == WOLFSSL_BIO_FILE) {
-        ret = pem_read_bio_file(bio, &mem);
-    }
-    else {
-        WOLFSSL_MSG("No data to read from bio");
-        ret = NOT_COMPILED_IN;
-    }
-
-#ifdef WOLFSSL_SMALL_STACK
-    if (ret >= 0) {
-        info = (EncryptedInfo*)XMALLOC(sizeof(EncryptedInfo), NULL,
-                                       DYNAMIC_TYPE_TMP_BUFFER);
-        if (info == NULL) {
-            WOLFSSL_MSG("Error getting memory for EncryptedInfo structure");
-            XFREE(mem, bio->heap, DYNAMIC_TYPE_OPENSSL);
-            mem = NULL;
-            ret = MEMORY_E;
-        }
-    }
-#endif /* WOLFSSL_SMALL_STACK */
-
-    if (ret >= 0) {
-        int memSz = ret;
-
-        XMEMSET(info, 0, sizeof(EncryptedInfo));
-        info->passwd_cb       = localCb;
-        info->passwd_userdata = pass;
-
-        /* Do not strip PKCS8 header */
-        ret = PemToDer((const unsigned char*)mem, memSz, keyType, der, NULL,
-            info, eccFlag);
-        if (ret < 0) {
-            WOLFSSL_MSG("Bad PEM To DER");
-        }
-        /* Write left over data back to BIO if not a file BIO */
-        else if ((memSz - (int)info->consumed) > 0 &&
-                 bio->type != WOLFSSL_BIO_FILE) {
-            if (wolfSSL_BIO_write(bio, mem + (int)info->consumed,
-                                  memSz - (int)info->consumed) <= 0) {
-                WOLFSSL_MSG("Unable to advance bio read pointer");
-            }
-        }
-    }
-
-#ifdef WOLFSSL_SMALL_STACK
-    XFREE(info, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-#endif
-    XFREE(mem, bio->heap, DYNAMIC_TYPE_OPENSSL);
-
-    return ret;
-}
-
 WOLFSSL_EVP_PKEY* wolfSSL_PEM_read_bio_PrivateKey(WOLFSSL_BIO* bio,
                                                   WOLFSSL_EVP_PKEY** key,
                                                   wc_pem_password_cb* cb,
@@ -28531,8 +28959,8 @@ WOLFSSL_EVP_PKEY* wolfSSL_PEM_read_bio_PrivateKey(WOLFSSL_BIO* bio,
     if (bio == NULL)
         return pkey;
 
-    if (pem_read_bio_key(bio, cb, pass, PRIVATEKEY_TYPE, &keyFormat,
-                                                                   &der) >= 0) {
+    if (pem_read_bio_key(bio, cb, pass, PRIVATEKEY_TYPE, &keyFormat, &der)
+            >= 0) {
         const unsigned char* ptr = der->buffer;
 
         if (keyFormat) {
@@ -28585,7 +29013,8 @@ WOLFSSL_EVP_PKEY *wolfSSL_PEM_read_bio_PUBKEY(WOLFSSL_BIO* bio,
     if (bio == NULL)
         return pkey;
 
-    if (pem_read_bio_key(bio, cb, pass, PUBLICKEY_TYPE, &keyFormat, &der) >= 0) {
+    if (pem_read_bio_key(bio, cb, pass, PUBLICKEY_TYPE, &keyFormat, &der)
+            >= 0) {
         const unsigned char* ptr = der->buffer;
 
         /* handle case where reuse is attempted */
@@ -28607,41 +29036,42 @@ WOLFSSL_EVP_PKEY *wolfSSL_PEM_read_bio_PUBKEY(WOLFSSL_BIO* bio,
 
     return pkey;
 }
+#endif /* !NO_BIO */
 
 #if !defined(NO_FILESYSTEM)
-WOLFSSL_EVP_PKEY *wolfSSL_PEM_read_PUBKEY(XFILE fp, WOLFSSL_EVP_PKEY **x,
-                                          wc_pem_password_cb *cb, void *u)
+WOLFSSL_EVP_PKEY *wolfSSL_PEM_read_PUBKEY(XFILE fp, WOLFSSL_EVP_PKEY **key,
+                                          wc_pem_password_cb *cb, void *pass)
 {
-    int err = 0;
-    WOLFSSL_EVP_PKEY* ret = NULL;
-    WOLFSSL_BIO* bio = NULL;
+    WOLFSSL_EVP_PKEY* pkey = NULL;
+    DerBuffer*        der = NULL;
+    int               keyFormat = 0;
 
-    WOLFSSL_ENTER("wolfSSL_PEM_read_PUBKEY");
+    WOLFSSL_ENTER("wolfSSL_PEM_read_bio_PUBKEY");
 
-    if (fp == XBADFILE) {
-        err = 1;
-    }
-    if (err == 0) {
-        bio = wolfSSL_BIO_new(wolfSSL_BIO_s_file());
-        err = bio == NULL;
-    }
-    if (err == 0) {
-        err = wolfSSL_BIO_set_fp(bio, fp, BIO_NOCLOSE) != WOLFSSL_SUCCESS;
-    }
-    if (err == 0) {
-        ret = wolfSSL_PEM_read_bio_PUBKEY(bio, x, cb, u);
-    }
+    if (pem_read_file_key(fp, cb, pass, PUBLICKEY_TYPE, &keyFormat, &der)
+            >= 0) {
+        const unsigned char* ptr = der->buffer;
 
-    if (bio != NULL) {
-        wolfSSL_BIO_free(bio);
+        /* handle case where reuse is attempted */
+        if (key != NULL && *key != NULL)
+            pkey = *key;
+
+        wolfSSL_d2i_PUBKEY(&pkey, &ptr, der->length);
+        if (pkey == NULL) {
+            WOLFSSL_MSG("Error loading DER buffer into WOLFSSL_EVP_PKEY");
+        }
     }
 
-    WOLFSSL_LEAVE("wolfSSL_PEM_read_PUBKEY", 0);
+    FreeDer(&der);
 
-    return ret;
+    if (key != NULL && pkey != NULL)
+        *key = pkey;
+
+    WOLFSSL_LEAVE("wolfSSL_PEM_read_bio_PUBKEY", 0);
+
+    return pkey;
 }
 #endif /* NO_FILESYSTEM */
-#endif /* !NO_BIO */
 #endif /* OPENSSL_EXTRA */
 
 #ifdef WOLFSSL_ALT_CERT_CHAINS
@@ -29501,37 +29931,55 @@ int wolfSSL_ASN1_STRING_canon(WOLFSSL_ASN1_STRING* asn_out,
 
 #if defined(OPENSSL_EXTRA) || defined(OPENSSL_ALL)
 #if !defined(NO_FILESYSTEM)
-#ifndef NO_BIO
     WOLFSSL_EVP_PKEY* wolfSSL_PEM_read_PrivateKey(XFILE fp,
-        WOLFSSL_EVP_PKEY **x, wc_pem_password_cb *cb, void *u)
+        WOLFSSL_EVP_PKEY **key, wc_pem_password_cb *cb, void *pass)
     {
-        int err = 0;
-        WOLFSSL_EVP_PKEY* ret = NULL;
-        WOLFSSL_BIO* bio = NULL;
+        WOLFSSL_EVP_PKEY* pkey = NULL;
+        DerBuffer*         der = NULL;
+        int             keyFormat = 0;
+        int                 type = -1;
 
         WOLFSSL_ENTER("wolfSSL_PEM_read_PrivateKey");
 
-        if (fp == XBADFILE) {
-            err = 1;
-        }
-        if (err == 0) {
-            bio = wolfSSL_BIO_new(wolfSSL_BIO_s_file());
-            err = bio == NULL;
-        }
-        if (err == 0) {
-            err = wolfSSL_BIO_set_fp(bio, fp, BIO_NOCLOSE) != WOLFSSL_SUCCESS;
-        }
-        if (err == 0) {
-            ret = wolfSSL_PEM_read_bio_PrivateKey(bio, x, cb, u);
+        if (pem_read_file_key(fp, cb, pass, PRIVATEKEY_TYPE, &keyFormat,
+                                                                   &der) >= 0) {
+            const unsigned char* ptr = der->buffer;
+
+            if (keyFormat) {
+                /* keyFormat is Key_Sum enum */
+                if (keyFormat == RSAk)
+                    type = EVP_PKEY_RSA;
+                else if (keyFormat == ECDSAk)
+                    type = EVP_PKEY_EC;
+                else if (keyFormat == DSAk)
+                    type = EVP_PKEY_DSA;
+                else if (keyFormat == DHk)
+                    type = EVP_PKEY_DH;
+            }
+            else {
+                /* Default to RSA if format is not set */
+                type = EVP_PKEY_RSA;
+            }
+
+            /* handle case where reuse is attempted */
+            if (key != NULL && *key != NULL)
+                pkey = *key;
+
+            wolfSSL_d2i_PrivateKey(type, &pkey, &ptr, der->length);
+            if (pkey == NULL) {
+                WOLFSSL_MSG("Error loading DER buffer into WOLFSSL_EVP_PKEY");
+            }
         }
 
-        if (bio != NULL) {
-            wolfSSL_BIO_free(bio);
-        }
+        FreeDer(&der);
 
-        return ret;
+        if (key != NULL && pkey != NULL)
+            *key = pkey;
+
+        WOLFSSL_LEAVE("wolfSSL_PEM_read_PrivateKey", 0);
+
+        return pkey;
     }
-#endif
 #endif
 #endif
 
@@ -29794,14 +30242,9 @@ int wolfSSL_ASN1_STRING_canon(WOLFSSL_ASN1_STRING* asn_out,
         if (name == NULL || header == NULL || data == NULL || len == NULL)
             return WOLFSSL_FAILURE;
 
-        bio = wolfSSL_BIO_new(wolfSSL_BIO_s_file());
+        bio = wolfSSL_BIO_new_fp(fp, BIO_NOCLOSE);
         if (bio == NULL)
             return 0;
-
-        if (wolfSSL_BIO_set_fp(bio, fp, BIO_NOCLOSE) != WOLFSSL_SUCCESS) {
-            wolfSSL_BIO_free(bio);
-            bio = NULL;
-        }
 
         ret = wolfSSL_PEM_read_bio(bio, name, header, data, len);
 
@@ -29820,14 +30263,9 @@ int wolfSSL_ASN1_STRING_canon(WOLFSSL_ASN1_STRING* asn_out,
         if (name == NULL || header == NULL || data == NULL)
             return 0;
 
-        bio = wolfSSL_BIO_new(wolfSSL_BIO_s_file());
+        bio = wolfSSL_BIO_new_fp(fp, BIO_NOCLOSE);
         if (bio == NULL)
             return 0;
-
-        if (wolfSSL_BIO_set_fp(bio, fp, BIO_NOCLOSE) != WOLFSSL_SUCCESS) {
-            wolfSSL_BIO_free(bio);
-            bio = NULL;
-        }
 
         ret = wolfSSL_PEM_write_bio(bio, name, header, data, len);
 
@@ -30303,9 +30741,9 @@ int wolfSSL_ASN1_STRING_canon(WOLFSSL_ASN1_STRING* asn_out,
             }
             /* Store cert to free it later */
             if (ret == WOLFSSL_SUCCESS && ctx->x509Chain == NULL) {
-                ctx->x509Chain = wolfSSL_sk_X509_new();
+                ctx->x509Chain = wolfSSL_sk_X509_new_null();
                 if (ctx->x509Chain == NULL) {
-                    WOLFSSL_MSG("wolfSSL_sk_X509_new error");
+                    WOLFSSL_MSG("wolfSSL_sk_X509_new_null error");
                     ret =  WOLFSSL_FAILURE;
                 }
             }
@@ -30351,9 +30789,9 @@ int wolfSSL_ASN1_STRING_canon(WOLFSSL_ASN1_STRING* asn_out,
                 ssl->buffers.weOwnCertChain = 1;
                 /* Store cert to free it later */
                 if (ssl->ourCertChain == NULL) {
-                    ssl->ourCertChain = wolfSSL_sk_X509_new();
+                    ssl->ourCertChain = wolfSSL_sk_X509_new_null();
                     if (ssl->ourCertChain == NULL) {
-                        WOLFSSL_MSG("wolfSSL_sk_X509_new error");
+                        WOLFSSL_MSG("wolfSSL_sk_X509_new_null error");
                         return WOLFSSL_FAILURE;
                     }
                 }
@@ -31609,7 +32047,12 @@ static void SESSION_ex_data_cache_update(WOLFSSL_SESSION* session, int idx,
 
     for (i = 0; i < SESSIONS_PER_ROW && i < sessRow->totalCount; i++) {
         if (XMEMCMP(id, sessRow->Sessions[i].sessionID, ID_LEN) == 0
-                && session->side == sessRow->Sessions[i].side) {
+                && session->side == sessRow->Sessions[i].side
+        #if defined(WOLFSSL_TLS13) && defined(HAVE_SESSION_TICKET)
+                && (IsAtLeastTLSv1_3(session->version) ==
+                    IsAtLeastTLSv1_3(sessRow->Sessions[i].version))
+        #endif
+            ) {
             if (get) {
                 *getRet = wolfSSL_CRYPTO_get_ex_data(
                         &sessRow->Sessions[i].ex_data, idx);
@@ -34309,32 +34752,33 @@ static int set_curves_list(WOLFSSL* ssl, WOLFSSL_CTX *ctx, const char* names)
             goto leave;
 
         XMEMCPY(name, names + start, len);
-        name[len] = 0;
+        name[len++] = 0;
 
-        if ((XSTRCMP(name, "prime256v1") == 0) ||
-            (XSTRCMP(name, "secp256r1") == 0) ||
-            (XSTRCMP(name, "P-256") == 0))
+        /* Use XSTRNCMP to avoid valgrind error. */
+        if ((XSTRNCMP(name, "prime256v1", len) == 0) ||
+            (XSTRNCMP(name, "secp256r1", len) == 0) ||
+            (XSTRNCMP(name, "P-256", len) == 0))
         {
             curve = WOLFSSL_ECC_SECP256R1;
         }
-        else if ((XSTRCMP(name, "secp384r1") == 0) ||
-                 (XSTRCMP(name, "P-384") == 0))
+        else if ((XSTRNCMP(name, "secp384r1", len) == 0) ||
+                 (XSTRNCMP(name, "P-384", len) == 0))
         {
             curve = WOLFSSL_ECC_SECP384R1;
         }
-        else if ((XSTRCMP(name, "secp521r1") == 0) ||
-                 (XSTRCMP(name, "P-521") == 0))
+        else if ((XSTRNCMP(name, "secp521r1", len) == 0) ||
+                 (XSTRNCMP(name, "P-521", len) == 0))
         {
             curve = WOLFSSL_ECC_SECP521R1;
         }
     #ifdef HAVE_CURVE25519
-        else if (XSTRCMP(name, "X25519") == 0)
+        else if (XSTRNCMP(name, "X25519", len) == 0)
         {
             curve = WOLFSSL_ECC_X25519;
         }
     #endif
     #ifdef HAVE_CURVE448
-        else if (XSTRCMP(name, "X448") == 0)
+        else if (XSTRNCMP(name, "X448", len) == 0)
         {
             curve = WOLFSSL_ECC_X448;
         }
@@ -37703,41 +38147,8 @@ static int bio_get_data(WOLFSSL_BIO* bio, byte** data)
 {
     int ret = 0;
     byte* mem = NULL;
-#ifndef NO_FILESYSTEM
-    long memSz;
-    XFILE file;
-    long curr;
-#endif
 
-    if ((ret = wolfSSL_BIO_pending(bio)) > 0) {
-    }
-#ifndef NO_FILESYSTEM
-    else if (bio->type == WOLFSSL_BIO_FILE) {
-        if (wolfSSL_BIO_get_fp(bio, &file) != WOLFSSL_SUCCESS)
-            ret = BAD_FUNC_ARG;
-        if (ret == 0) {
-            curr = XFTELL(file);
-            if (curr < 0) {
-                ret = WOLFSSL_BAD_FILE;
-            }
-            if (XFSEEK(file, 0, XSEEK_END) != 0)
-                ret = WOLFSSL_BAD_FILE;
-        }
-        if (ret == 0) {
-            memSz = XFTELL(file);
-            if (memSz > MAX_WOLFSSL_FILE_SIZE || memSz < 0) {
-                ret = WOLFSSL_BAD_FILE;
-            }
-        }
-        if (ret == 0) {
-            memSz -= curr;
-            ret = (int)memSz;
-            if (XFSEEK(file, curr, SEEK_SET) != 0)
-                ret = WOLFSSL_BAD_FILE;
-        }
-    }
-#endif
-
+    ret = wolfSSL_BIO_get_len(bio);
     if (ret > 0) {
         mem = (byte*)XMALLOC(ret, bio->heap, DYNAMIC_TYPE_OPENSSL);
         if (mem == NULL) {
@@ -39712,7 +40123,7 @@ WOLFSSL_STACK* wolfSSL_PKCS7_to_stack(PKCS7* pkcs7)
         WOLFSSL_X509* x509 = wolfSSL_X509_d2i(NULL, p7->pkcs7.cert[i],
             p7->pkcs7.certSz[i]);
         if (!ret)
-            ret = wolfSSL_sk_X509_new();
+            ret = wolfSSL_sk_X509_new_null();
         if (x509) {
             if (wolfSSL_sk_X509_push(ret, x509) != WOLFSSL_SUCCESS) {
                 wolfSSL_X509_free(x509);
@@ -39769,7 +40180,7 @@ WOLFSSL_STACK* wolfSSL_PKCS7_get0_signers(PKCS7* pkcs7, WOLFSSL_STACK* certs,
         return NULL;
     }
 
-    signers = wolfSSL_sk_X509_new();
+    signers = wolfSSL_sk_X509_new_null();
     if (signers == NULL)
         return NULL;
 

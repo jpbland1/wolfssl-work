@@ -238,7 +238,7 @@ enum Ctc_Misc {
      * We support only hash */
     CTC_MAX_SKID_SIZE = 32, /* SHA256_DIGEST_SIZE */
     CTC_MAX_AKID_SIZE = 32, /* SHA256_DIGEST_SIZE */
-    CTC_MAX_CERTPOL_SZ = 64,
+    CTC_MAX_CERTPOL_SZ = 200, /* RFC 5280 Section 4.2.1.4 */
     CTC_MAX_CERTPOL_NB = 2, /* Max number of Certificate Policy */
     CTC_MAX_CRLINFO_SZ = 200, /* Arbitrary size that should be enough for at
                                * least two distribution points. */
@@ -285,10 +285,11 @@ typedef int (wc_pem_password_cb)(char* passwd, int sz, int rw, void* userdata);
 #endif
 
 typedef struct EncryptedInfo {
-    wc_pem_password_cb* passwd_cb;
-    void*            passwd_userdata;
-
     long     consumed;         /* tracks PEM bytes consumed */
+
+#ifdef WOLFSSL_ENCRYPTED_KEYS
+    wc_pem_password_cb* passwd_cb;
+    void*               passwd_userdata;
 
     int      cipherType;
     word32   keySz;
@@ -298,6 +299,7 @@ typedef struct EncryptedInfo {
     byte     iv[IV_SZ];        /* salt or encrypted IV */
 
     word16   set:1;            /* if encryption set */
+#endif
 } EncryptedInfo;
 
 
