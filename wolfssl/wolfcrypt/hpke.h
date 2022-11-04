@@ -62,9 +62,9 @@ enum {
 #define HPKE_SUPPORTED_KEM_LEN 4
 #define HPKE_SUPPORTED_KDF_LEN 3
 #define HPKE_SUPPORTED_AEAD_LEN 2
-extern const int hpke_supported_kem[HPKE_SUPPORTED_KEM_LEN];
-extern const int hpke_supported_kdf[HPKE_SUPPORTED_KDF_LEN];
-extern const int hpke_supported_aead[HPKE_SUPPORTED_AEAD_LEN];
+extern const int hpkeSupportedKem[HPKE_SUPPORTED_KEM_LEN];
+extern const int hpkeSupportedKdf[HPKE_SUPPORTED_KDF_LEN];
+extern const int hpkeSupportedAead[HPKE_SUPPORTED_AEAD_LEN];
 
 #define HPKE_Nh_MAX 64
 #define HPKE_Nk_MAX 32

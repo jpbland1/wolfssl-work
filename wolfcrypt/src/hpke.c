@@ -37,7 +37,7 @@
 #include <wolfssl/wolfcrypt/aes.h>
 #include <wolfssl/wolfcrypt/hpke.h>
 
-const int hpke_supported_kem[HPKE_SUPPORTED_KEM_LEN] =
+const int hpkeSupportedKem[HPKE_SUPPORTED_KEM_LEN] =
 {
   DHKEM_P256_HKDF_SHA256,
   DHKEM_P384_HKDF_SHA384,
@@ -45,14 +45,14 @@ const int hpke_supported_kem[HPKE_SUPPORTED_KEM_LEN] =
   DHKEM_X25519_HKDF_SHA256,
 };
 
-const int hpke_supported_kdf[HPKE_SUPPORTED_KDF_LEN] =
+const int hpkeSupportedKdf[HPKE_SUPPORTED_KDF_LEN] =
 {
     HKDF_SHA256,
     HKDF_SHA384,
     HKDF_SHA512,
 };
 
-const int hpke_supported_aead[HPKE_SUPPORTED_AEAD_LEN] =
+const int hpkeSupportedAead[HPKE_SUPPORTED_AEAD_LEN] =
 {
     HPKE_AES_128_GCM,
     HPKE_AES_256_GCM,

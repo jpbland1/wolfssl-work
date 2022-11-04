@@ -2540,52 +2540,51 @@ typedef enum {
 } TLSX_Type;
 
 #if defined(HAVE_HPKE) && defined(HAVE_ECC)
+#define ECH_TYPE_OUTER 0
+#define ECH_TYPE_INNER 1
+
 typedef struct EchCipherSuite
 {
-    word16 kdf_id;
-    word16 aead_id;
+    word16 kdfId;
+    word16 aeadId;
 } EchCipherSuite;
 
 typedef struct EchConfig
 {
-    byte config_id;
-    word16 kem_id;
-    byte receiver_pubkey[HPKE_Npk_MAX];
-    byte num_cipher_suites;
-    EchCipherSuite* cipher_suites;
-    char* public_name;
+    byte configId;
+    word16 kemId;
+    byte receiverPubkey[HPKE_Npk_MAX];
+    byte numCipherSuites;
+    EchCipherSuite* cipherSuites;
+    char* publicName;
     byte* raw;
-    word32 raw_len;
+    word32 rawLen;
     struct EchConfig* next;
 } EchConfig;
 
 typedef struct ECH
 {
     byte type;
-    word16 kem_id;
-    struct
-    {
-      word16 kdf_id;
-      word16 aead_id;
-    } cipher_suite;
-    byte config_id;
+    word16 kemId;
+    EchCipherSuite cipherSuite;
+    byte configId;
     byte enc[HPKE_Npk_MAX];
-    word32 enc_len;
-    word32 inner_client_hello_len;
-    word32 padding_len;
-    byte* inner_client_hello;
-    byte* outer_client_payload_p;
+    word32 encLen;
+    word32 innerClientHelloLen;
+    word32 paddingLen;
+    byte* innerClientHello;
+    byte* outerClientPayload;
     byte* aad;
-    word32 aad_len;
+    word32 aadLen;
     Hpke* hpke;
-    void* ephemeral_key;
-    word32 is_grease:1;
-    EchConfig* ech_config;
+    void* ephemeralKey;
+    word32 isGrease:1;
+    EchConfig* echConfig;
 } ECH;
 
 int EchConfigGetSupportedCipherSuite(EchConfig* config);
 
-WOLFSSL_LOCAL int   TLSX_FinalizeEch(ECH* ech, byte* aad, word32 aad_len);
+WOLFSSL_LOCAL int   TLSX_FinalizeEch(ECH* ech, byte* aad, word32 aadLen);
 #endif
 
 typedef struct TLSX {
@@ -5259,7 +5258,7 @@ struct WOLFSSL {
     } quic;
 #endif /* WOLFSSL_QUIC */
 #if defined(HAVE_HPKE) && defined(HAVE_ECC)
-  EchConfig* ech_configs;
+  EchConfig* echConfigs;
 #endif
 };
 
