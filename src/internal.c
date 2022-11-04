@@ -6516,7 +6516,7 @@ void FreeHandshakeHashes(WOLFSSL* ssl)
 int InitHandshakeHashesAndCopy(WOLFSSL* ssl, HS_Hashes* source,
   HS_Hashes** destination)
 {
-    int ret;
+    int ret = 0;
     HS_Hashes* tmpHashes;
 
     /* save the original so we can put it back afterward */

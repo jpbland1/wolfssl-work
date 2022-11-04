@@ -11160,7 +11160,7 @@ static int TLSX_ECH_Use(EchConfig* echConfig, TLSX** extensions, void* heap)
 /* return length after writing the ech */
 static int TLSX_ECH_Write(ECH* ech, byte* writeBuf)
 {
-    int ret;
+    int ret = 0;
     void* ephemeralKey = NULL;
     byte* writeBuf_p = writeBuf;
 #ifdef WOLFSSL_SMALL_STACK
