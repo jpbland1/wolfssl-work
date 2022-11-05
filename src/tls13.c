@@ -170,7 +170,14 @@ static const byte dtls13ProtocolLabel[DTLS13_PROTOCOL_LABEL_SZ + 1] = "dtls13";
 static const byte echAcceptConfirmationLabel[ECH_ACCEPT_CONFIRMATION_LEABEL_SZ + 1] = "ech accept confirmation";
 #endif
 
+#ifndef NO_CERTS
+#if !defined(NO_RSA) || defined(HAVE_ECC) || defined(HAVE_ED25519) || \
+    defined(HAVE_ED448) || defined(HAVE_PQC)
+
 static WC_INLINE int GetMsgHash(WOLFSSL* ssl, byte* hash);
+
+#endif
+#endif
 
 /* Derive a key from a message.
  *
