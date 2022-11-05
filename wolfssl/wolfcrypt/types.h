@@ -788,7 +788,7 @@ typedef struct w64wrapper {
 
         #if defined(WOLFSSL_CERT_EXT) || defined(HAVE_OCSP) || \
             defined(HAVE_CRL_IO) || defined(HAVE_HTTP_CLIENT) || \
-            !defined(NO_CRYPT_BENCHMARK)
+            !defined(NO_CRYPT_BENCHMARK) || defined(OPENSSL_EXTRA)
 
             #ifndef XATOI /* if custom XATOI is not already defined */
                 #include <stdlib.h>
@@ -1011,9 +1011,6 @@ typedef struct w64wrapper {
         #ifndef WOLFSSL_NOSHA512_256
             #define WOLFSSL_NOSHA512_256
         #endif
-        #ifndef WOLFSSL_NO_SHAKE256
-            #define WOLFSSL_NO_SHAKE256
-        #endif
     #else
         WC_HASH_TYPE_NONE = 0,
         WC_HASH_TYPE_MD2 = 1,
@@ -1031,27 +1028,27 @@ typedef struct w64wrapper {
         WC_HASH_TYPE_SHA3_512 = 13,
         WC_HASH_TYPE_BLAKE2B = 14,
         WC_HASH_TYPE_BLAKE2S = 15,
-#define _WC_HASH_TYPE_MAX WC_HASH_TYPE_BLAKE2S
+        #define _WC_HASH_TYPE_MAX WC_HASH_TYPE_BLAKE2S
         #ifndef WOLFSSL_NOSHA512_224
             WC_HASH_TYPE_SHA512_224 = 16,
-#undef _WC_HASH_TYPE_MAX
-#define _WC_HASH_TYPE_MAX WC_HASH_TYPE_SHA512_224
+            #undef _WC_HASH_TYPE_MAX
+            #define _WC_HASH_TYPE_MAX WC_HASH_TYPE_SHA512_224
         #endif
         #ifndef WOLFSSL_NOSHA512_256
             WC_HASH_TYPE_SHA512_256 = 17,
-#undef _WC_HASH_TYPE_MAX
-#define _WC_HASH_TYPE_MAX WC_HASH_TYPE_SHA512_256
+            #undef _WC_HASH_TYPE_MAX
+            #define _WC_HASH_TYPE_MAX WC_HASH_TYPE_SHA512_256
         #endif
-        #ifndef WOLFSSL_NO_SHAKE128
+        #ifdef WOLFSSL_SHAKE128
             WC_HASH_TYPE_SHAKE128 = 18,
         #endif
-        #ifndef WOLFSSL_NO_SHAKE256
+        #ifdef WOLFSSL_SHAKE256
             WC_HASH_TYPE_SHAKE256 = 19,
-#undef _WC_HASH_TYPE_MAX
-#define _WC_HASH_TYPE_MAX WC_HASH_TYPE_SHAKE256
+            #undef _WC_HASH_TYPE_MAX
+            #define _WC_HASH_TYPE_MAX WC_HASH_TYPE_SHAKE256
         #endif
         WC_HASH_TYPE_MAX = _WC_HASH_TYPE_MAX
-#undef _WC_HASH_TYPE_MAX
+        #undef _WC_HASH_TYPE_MAX
 
     #endif /* HAVE_SELFTEST */
     };
@@ -1134,7 +1131,8 @@ typedef struct w64wrapper {
     /* AESNI requires alignment and ARMASM gains some performance from it
      * Xilinx RSA operations require alignment */
     #if defined(WOLFSSL_AESNI) || defined(WOLFSSL_ARMASM) || \
-        defined(USE_INTEL_SPEEDUP) || defined(WOLFSSL_AFALG_XILINX)
+        defined(USE_INTEL_SPEEDUP) || defined(WOLFSSL_AFALG_XILINX) || \
+        defined(WOLFSSL_XILINX)
           #ifndef WOLFSSL_USE_ALIGN
               #define WOLFSSL_USE_ALIGN
           #endif
@@ -1236,6 +1234,53 @@ typedef struct w64wrapper {
         #define FALSE 0
     #endif
 
+    #ifdef SINGLE_THREADED
+        #if defined(WC_32BIT_CPU)
+            typedef void*        THREAD_RETURN;
+        #else
+            typedef unsigned int THREAD_RETURN;
+        #endif
+        typedef void*            THREAD_TYPE;
+        #define WOLFSSL_THREAD
+    #elif defined(WOLFSSL_MDK_ARM) || defined(WOLFSSL_KEIL_TCP_NET) || \
+          defined(FREESCALE_MQX)
+        typedef unsigned int  THREAD_RETURN;
+        typedef int           THREAD_TYPE;
+        #define WOLFSSL_THREAD
+    #elif defined(WOLFSSL_NUCLEUS)
+        typedef unsigned int  THREAD_RETURN;
+        typedef intptr_t      THREAD_TYPE;
+        #define WOLFSSL_THREAD
+    #elif defined(WOLFSSL_TIRTOS)
+        typedef void          THREAD_RETURN;
+        typedef Task_Handle   THREAD_TYPE;
+        #define WOLFSSL_THREAD
+    #elif defined(WOLFSSL_ZEPHYR)
+        typedef void            THREAD_RETURN;
+        typedef struct k_thread THREAD_TYPE;
+        #define WOLFSSL_THREAD
+    #elif defined(NETOS)
+        typedef UINT        THREAD_RETURN;
+        typedef TX_THREAD   THREAD_TYPE;
+        #define WOLFSSL_THREAD
+        #define INFINITE TX_WAIT_FOREVER
+        #define WAIT_OBJECT_0 TX_NO_WAIT
+    #elif defined(WOLFSSL_LINUXKM)
+        typedef unsigned int  THREAD_RETURN;
+        typedef size_t        THREAD_TYPE;
+        #define WOLFSSL_THREAD
+    #elif (defined(_POSIX_THREADS) || defined(HAVE_PTHREAD)) && \
+        !defined(__MINGW32__)
+        typedef void*         THREAD_RETURN;
+        typedef pthread_t     THREAD_TYPE;
+        #define WOLFSSL_THREAD
+        #define INFINITE      (-1)
+        #define WAIT_OBJECT_0 0L
+    #else
+        typedef unsigned int  THREAD_RETURN;
+        typedef size_t        THREAD_TYPE;
+        #define WOLFSSL_THREAD __stdcall
+    #endif
 
     #if defined(HAVE_STACK_SIZE)
         #define EXIT_TEST(ret) return (THREAD_RETURN)((size_t)(ret))

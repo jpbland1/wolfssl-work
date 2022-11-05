@@ -2445,7 +2445,7 @@ time_t pic32_time(time_t* timer)
 
 #endif /* MICROCHIP_TCPIP || MICROCHIP_TCPIP_V5 */
 
-#if defined(WOLFSSL_DEOS)
+#if defined(WOLFSSL_DEOS) || defined(WOLFSSL_DEOS_RTEMS)
 
 time_t deos_time(time_t* timer)
 {
@@ -2462,7 +2462,7 @@ time_t deos_time(time_t* timer)
         return (time_t) *systemTickPtr/systemTickTimeInHz;
     #endif
 }
-#endif /* WOLFSSL_DEOS */
+#endif /* WOLFSSL_DEOS || WOLFSSL_DEOS_RTEMS */
 
 #if defined(FREESCALE_RTC)
 #include "fsl_rtc.h"
@@ -2667,6 +2667,8 @@ time_t stm32_hal_time(time_t *t1)
     time_t ret;
     RTC_TimeTypeDef time;
     RTC_DateTypeDef date;
+
+    XMEMSET(tm_time, 0, sizeof(struct tm));
 
     /* order of GetTime followed by GetDate required here due to STM32 HW
      * requirement */

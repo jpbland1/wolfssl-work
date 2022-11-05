@@ -7,7 +7,7 @@
 #
 AC_COPYRIGHT([Copyright (C) 2006-2020 wolfSSL Inc.])
 AC_PREREQ([2.69])
-AC_INIT([wolfssl],[5.5.0],[https://github.com/wolfssl/wolfssl/issues],[wolfssl],[https://www.wolfssl.com])
+AC_INIT([wolfssl],[5.5.3],[https://github.com/wolfssl/wolfssl/issues],[wolfssl],[https://www.wolfssl.com])
 AC_CONFIG_AUX_DIR([build-aux])
 
 # The following sets CFLAGS to empty if unset on command line.  We do not
@@ -37,8 +37,16 @@ LT_INIT([disable-static win32-dll])
 
 AC_ARG_VAR(EXTRA_CFLAGS, [Extra CFLAGS to add to autoconf-computed arg list.  Can also supply directly to make.])
 
-#shared library versioning
-WOLFSSL_LIBRARY_VERSION=35:0:0
+WOLFSSL_CONFIG_ARGS=$ac_configure_args
+AC_SUBST([WOLFSSL_CONFIG_ARGS])
+
+# shared library versioning
+# The three numbers in the libwolfssl.so.*.*.* file name. Unfortunately
+# these numbers don't always line up nicely with the library version.
+WOLFSSL_LIBRARY_VERSION_FIRST=35
+WOLFSSL_LIBRARY_VERSION_SECOND=2
+WOLFSSL_LIBRARY_VERSION_THIRD=1
+WOLFSSL_LIBRARY_VERSION=37:1:2
 #                        | | |
 #                 +------+ | +---+
 #                 |        |     |
@@ -50,6 +58,9 @@ WOLFSSL_LIBRARY_VERSION=35:0:0
 #                 |        +- increment if source code has changed
 #                 |           set to zero if current is incremented
 #                 +- increment if interfaces have been added, removed or changed
+AC_SUBST([WOLFSSL_LIBRARY_VERSION_FIRST])
+AC_SUBST([WOLFSSL_LIBRARY_VERSION_SECOND])
+AC_SUBST([WOLFSSL_LIBRARY_VERSION_THIRD])
 AC_SUBST([WOLFSSL_LIBRARY_VERSION])
 
 gl_VISIBILITY
@@ -576,6 +587,15 @@ then
     ENABLED_FASTMATH="yes"
 fi
 
+if test "$host_cpu" = "x86_64" || test "$host_cpu" = "amd64"
+then
+    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_X86_64_BUILD"
+fi
+if test "$host_cpu" = "x86"
+then
+    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_X86_BUILD"
+fi
+
 # if sp-math-all is not set, then enable fast math
 if test "x$ENABLED_FASTMATH" = "xyes" && test "$enable_sp_math_all" = "" && test "$enable_sp_math" = ""
 then
@@ -593,11 +613,6 @@ then
         AM_CFLAGS="$AM_CFLAGS -DUSE_FAST_MATH"
         ENABLED_HEAPMATH="no"
         ENABLED_SP_MATH_ALL="no"
-    fi
-    if test "$host_cpu" = "x86_64" || test "$host_cpu" = "amd64"
-    then
-        # Have settings.h set FP_MAX_BITS higher if user didn't set directly
-        AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_X86_64_BUILD"
     fi
     AS_IF([test "x$host_cpu" = "xaarch64"],[AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_AARCH64_BUILD"])
 
@@ -936,7 +951,6 @@ then
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_HAVE_ISSUER_NAMES"
 fi
 
-
 # liboqs
 ENABLED_LIBOQS="no"
 tryliboqsdir=""
@@ -1093,7 +1107,6 @@ AC_ARG_ENABLE([cryptonly],
     [ENABLED_CRYPTONLY=no])
 
 AS_IF([test "x$FIPS_VERSION" = "xrand"],[ENABLED_CRYPTONLY="yes"])
-
 
 # DTLS
 # DTLS is a prereq for the options mcast, sctp, and jni. Enabling any of those
@@ -1994,6 +2007,7 @@ AC_ARG_ENABLE([aescbc],
 if test "$ENABLED_AESCBC" = "no"
 then
     AM_CFLAGS="$AM_CFLAGS -DNO_AES_CBC"
+    AM_CCASFLAGS="$AM_CCASFLAGS -DHAVE_AES_CBC"
 fi
 
 # AES-CBC length checks (checks that input lengths are multiples of block size)
@@ -2045,6 +2059,7 @@ AC_ARG_ENABLE([aesccm],
 if test "$ENABLED_AESCCM" = "yes" || test "$ENABLED_WOLFENGINE" = "yes"
 then
     AM_CFLAGS="$AM_CFLAGS -DHAVE_AESCCM"
+    AM_CCASFLAGS="$AM_CCASFLAGS -DHAVE_AESCCM"
 fi
 
 # AES-SIV (RFC 5297)
@@ -2163,6 +2178,7 @@ then
             esac
             # Include options.h
             AM_CCASFLAGS="$AM_CCASFLAGS -DEXTERNAL_OPTS_OPENVPN"
+            ENABLED_ARMASM_CRYPTO=yes
 
             # Check for and set -mstrict-align compiler flag
             # Used to set assumption that Aarch64 systems will not handle
@@ -2179,12 +2195,23 @@ then
                     AM_CPPFLAGS="$AM_CPPFLAGS -mstrict-align"
                     AC_MSG_NOTICE([64bit ARMv8, setting -mstrict-align]);;
             esac
-            AC_MSG_NOTICE([64bit ARMv8 found, setting mcpu to generic+crypto]);;
+            AC_MSG_NOTICE([64bit ARMv8 found, setting mcpu to generic+crypto])
+            ;;
+        armv7a)
+            AM_CPPFLAGS="$AM_CPPFLAGS -march=armv7-a -mfpu=neon -DWOLFSSL_ARMASM_NO_HW_CRYPTO -DWOLFSSL_ARM_ARCH=7"
+            # Include options.h
+            AM_CCASFLAGS="$AM_CCASFLAGS -DEXTERNAL_OPTS_OPENVPN"
+            ENABLED_ARMASM_CRYPTO=no
+            ENABLED_AESGCM_STREAM=no # not yet implemented
+            AC_MSG_NOTICE([32bit ARMv7-a found, setting mfpu to neon])
+            ;;
         *)
             AM_CPPFLAGS="$AM_CPPFLAGS -mfpu=crypto-neon-fp-armv8"
             # Include options.h
             AM_CCASFLAGS="$AM_CCASFLAGS -DEXTERNAL_OPTS_OPENVPN"
-            AC_MSG_NOTICE([32bit ARMv8 found, setting mfpu to crypto-neon-fp-armv8]);;
+            ENABLED_ARMASM_CRYPTO=yes
+            AC_MSG_NOTICE([32bit ARMv8 found, setting mfpu to crypto-neon-fp-armv8])
+            ;;
         esac
     esac
 fi
@@ -2301,6 +2328,16 @@ then
     then
         AM_CFLAGS="$AM_CFLAGS -DUSE_INTEL_SPEEDUP"
         ENABLED_AESNI=yes
+    fi
+
+    if test "$host_cpu" = "x86_64" || test "$host_cpu" = "amd64"
+    then
+        AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_X86_64_BUILD"
+    fi
+    if test "$host_cpu" = "x86"
+    then
+        AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_X86_BUILD"
+        ENABLED_X86_ASM=yes
     fi
 fi
 
@@ -4174,7 +4211,11 @@ AS_CASE([$FIPS_VERSION],
             [ENABLED_SHA512="yes"; AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_SHA512 -DWOLFSSL_SHA384"])
 
         AS_IF([test "$ENABLED_AESGCM" = "no" && (test "$FIPS_VERSION" != "dev" || test "$enable_aesgcm" != "no")],
-            [ENABLED_AESGCM="yes"; AM_CFLAGS="$AM_CFLAGS -DHAVE_AESGCM"])
+            [ENABLED_AESGCM="yes"; AM_CFLAGS="$AM_CFLAGS -DHAVE_AESGCM"; AM_CCASFLAGS="$AM_CCASFLAGS -DHAVE_AESGCM"])
+
+        # AES-GCM streaming isn't part of the current FIPS suite.
+        AS_IF([test "$ENABLED_AESGCM_STREAM" = "yes" && (test "$FIPS_VERSION" != "dev" || test "$enable_aesgcm_stream" != "yes")],
+            [ENABLED_AESGCM_STREAM="no"])
 
         # Old TLS requires MD5 + HMAC, which is not allowed under FIPS 140-3
         AS_IF([test "$ENABLED_OLD_TLS" != "no"],
@@ -4228,6 +4269,9 @@ AS_CASE([$FIPS_VERSION],
         AS_IF([test "x$ENABLED_AESCTR" != "xyes"],
               [ENABLED_AESCTR="yes"
                AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_AES_COUNTER"])
+        AS_IF([test "x$ENABLED_AESCTR" != "xyes"],
+              [ENABLED_AESCTR="yes"
+               AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_AES_COUNTER"])
         AS_IF([test "x$ENABLED_CMAC" != "xyes"],
               [ENABLED_CMAC="yes"
                AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_CMAC"])
@@ -4913,6 +4957,17 @@ fi
 if test "x$ENABLED_SESSION_TICKET" = "xyes"
 then
     AM_CFLAGS="$AM_CFLAGS -DHAVE_TLS_EXTENSIONS -DHAVE_SESSION_TICKET"
+fi
+
+AC_ARG_ENABLE([ticket-nonce-malloc],
+    [AS_HELP_STRING([--enable-ticket-nonce-malloc], [Enable dynamic allocation of ticket nonces (default: disabled)])],
+    [ ENABLED_TICKET_NONCE_MALLOC=$enableval ],
+    [ ENABLED_TICKET_NONCE_MALLOC=no ]
+    )
+
+if test "$ENABLED_TICKET_NONCE_MALLOC" = "yes"
+then
+    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_TICKET_NONCE_MALLOC"
 fi
 
 # Extended Master Secret Extension
@@ -6723,7 +6778,7 @@ if test "$ENABLED_SP_MATH_ALL" = "yes" && test "$ENABLED_ASM" != "no"; then
 
   case $host_cpu in
   *x86_64* | *amd64*)
-    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_SP_X86_64 -DWOLFSSL_X86_64_BUILD"
+    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_SP_X86_64"
     ;;
   *x86*)
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_SP_X86"
@@ -6808,10 +6863,6 @@ if test "$ENABLED_SP_ASM" = "yes" && test "$ENABLED_SP" = "yes"; then
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_SP_X86_64_ASM"
     AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_SP_X86_64_ASM"
     ENABLED_SP_X86_64_ASM=yes
-    if test "x$ENABLED_FASTMATH" = "xno"
-    then
-      AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_X86_64_BUILD"
-    fi
     ;;
   *)
     AC_MSG_ERROR([ASM not available for CPU. Supported CPUs: x86_64, aarch64, arm])
@@ -7328,6 +7379,12 @@ AC_ARG_ENABLE([optflags],
     [ ENABLED_OPTFLAGS=yes ]
     )
 
+# Adds functionality to load CA certificates from the operating system.
+AC_ARG_ENABLE([sys-ca-certs],
+    [AS_HELP_STRING([--enable-sys-ca-certs],[Enable ability to load CA certs from OS (default: enabled)])],
+    [ ENABLED_SYS_CA_CERTS=$enableval ],
+    [ ENABLED_SYS_CA_CERTS=yes ]
+    )
 
 # check if should run the trusted peer certs test
 # (for now checking both C_FLAGS and C_EXTRA_FLAGS)
@@ -7389,6 +7446,17 @@ esac
 ################################################################################
 # Update ENABLE_* variables                                                    #
 ################################################################################
+
+if test "x$ENABLED_SYS_CA_CERTS" = "xyes"
+then
+    if test "x$ENABLED_FILESYSTEM" = "xno"
+    then
+        ENABLED_SYS_CA_CERTS="no"
+    elif test "x$ENABLED_CERTS" = "xno"
+    then
+        ENABLED_SYS_CA_CERTS="no"
+    fi
+fi
 
 if test "x$ENABLED_WOLFCLU" = "xyes"
 then
@@ -7493,6 +7561,11 @@ then
     ENABLED_CERTS=yes
 fi
 
+if test "$ENABLED_ED25519" != "no" || test "$ENABLED_ED448" != "no"
+then
+    ENABLED_CERTS=yes
+fi
+
 if test "$ENABLED_MD5" = "yes"
 then
     # turn off MD5 if leanpsk or leantls on
@@ -7500,6 +7573,13 @@ then
     then
         ENABLED_MD5=no
     fi
+fi
+
+if test "x$ENABLED_LEANPSK" = "xyes" || test "x$ENABLED_CERTS" = "xno" || \
+   test "x$ENABLED_ASN" = "xno"
+then
+   ENABLED_CERTS=no
+   ENABLED_ASN=no
 fi
 
 ################################################################################
@@ -7603,6 +7683,14 @@ AS_IF([test "x$ENABLED_16BIT" = "xyes" && \
 ################################################################################
 # Update CFLAGS based on options                                               #
 ################################################################################
+AS_IF([test "x$ENABLED_CERTS" = "xno"],
+      [AM_CFLAGS="$AM_CFLAGS -DNO_CERTS"])
+
+AS_IF([test "x$ENABLED_ASN" = "xno"],
+      [AM_CFLAGS="$AM_CFLAGS -DNO_ASN"])
+
+AS_IF([test "x$ENABLED_SYS_CA_CERTS" = "xyes"],
+      [AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_SYS_CA_CERTS"])
 
 AS_IF([test "x$ENABLED_ALTNAMES" = "xyes"],
       [AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_ALT_NAMES"])
@@ -7876,11 +7964,6 @@ fi
 
 AS_IF([test "x$ENABLED_WOLFSSH" = "xyes"],[AM_CPPFLAGS="$AM_CPPFLAGS -DWOLFSSL_WOLFSSH"])
 
-if test "x$ENABLED_CERTS" = "xno" || test "x$ENABLED_LEANPSK" = "xyes" || test "x$ENABLED_ASN" = "xno"; then
-   AM_CFLAGS="$AM_CFLAGS -DNO_ASN -DNO_CERTS"
-   ENABLED_ASN=no
-fi
-
 # only allow secure renegotiation info with TLSV12 and ASN
 if test "x$ENABLED_ASN" = "xno" || \
     test "x$ENABLED_TLSV12" = "xno" || \
@@ -7917,9 +8000,17 @@ fi
 # USER SETTINGS
 if test "x$ENABLED_USERSETTINGS" = "xyes"
 then
-    # Replace all options and just use WOLFSSL_USER_SETTINGS
-    AM_CFLAGS="-DWOLFSSL_USER_SETTINGS"
-    AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_USER_SETTINGS"
+    # Replace all options and just use WOLFSSL_USER_SETTINGS and
+    # WOLFSSL_USER_SETTINGS_ASM.
+    AM_CFLAGS="-DWOLFSSL_USER_SETTINGS -DWOLFSSL_USER_SETTINGS_ASM"
+    AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_USER_SETTINGS -DWOLFSSL_USER_SETTINGS_ASM"
+
+    # Generate assembly-safe user_settings_asm.h (just preprocessor directives
+    # from user_settings.h).
+    $srcdir/scripts/user_settings_asm.sh "$CPPFLAGS $CFLAGS $CXXFLAGS"
+    if test $? -ne 0; then
+        AC_MSG_ERROR([$srcdir/scripts/user_settings_asm.sh failed.])
+    fi
 fi
 
 # OPTIMIZE FLAGS
@@ -7966,13 +8057,12 @@ then
     AM_CFLAGS="$AM_CFLAGS -DHAVE___UINT128_T=1"
 fi
 
-
 LIB_SOCKET_NSL
 AX_HARDEN_CC_COMPILER_FLAGS
 
-# if mingw then link to ws2_32 for sockets
 case $host_os in
     mingw*)
+        # if mingw then link to ws2_32 for sockets
         LDFLAGS="$LDFLAGS -lws2_32"
         if test "$enable_shared" = "yes"
         then
@@ -7982,6 +8072,10 @@ case $host_os in
                 MINGW_LIB_WARNING="yes"
             fi
         fi ;;
+    *darwin*)
+        # For Mac we need these frameworks to load system CA certs
+        LDFLAGS="$LDFLAGS -framework CoreFoundation -framework Security"
+        ;;
 esac
 
 if test "$enable_shared" = "no"; then
@@ -8084,9 +8178,11 @@ AM_CONDITIONAL([BUILD_AESGCM],[test "x$ENABLED_AESGCM" = "xyes" || test "x$ENABL
 AM_CONDITIONAL([BUILD_AESCCM],[test "x$ENABLED_AESCCM" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
 AM_CONDITIONAL([BUILD_ARMASM],[test "x$ENABLED_ARMASM" = "xyes"])
 AM_CONDITIONAL([BUILD_ARMASM_INLINE],[test "x$ENABLED_ARMASM_INLINE" = "xyes"])
+AM_CONDITIONAL([BUILD_ARMASM_CRYPTO],[test "x$ENABLED_ARMASM_CRYPTO" = "xyes"])
 AM_CONDITIONAL([BUILD_XILINX],[test "x$ENABLED_XILINX" = "xyes"])
 AM_CONDITIONAL([BUILD_AESNI],[test "x$ENABLED_AESNI" = "xyes"])
 AM_CONDITIONAL([BUILD_INTELASM],[test "x$ENABLED_INTELASM" = "xyes"])
+AM_CONDITIONAL([BUILD_X86_ASM],[test "x$ENABLED_X86_ASM" = "xyes"])
 AM_CONDITIONAL([BUILD_AFALG],[test "x$ENABLED_AFALG" = "xyes"])
 AM_CONDITIONAL([BUILD_KCAPI],[test "x$ENABLED_KCAPI" = "xyes"])
 AM_CONDITIONAL([BUILD_DEVCRYPTO],[test "x$ENABLED_DEVCRYPTO" = "xyes"])
@@ -8123,6 +8219,7 @@ AM_CONDITIONAL([BUILD_RC4],[test "x$ENABLED_ARC4" = "xyes" || test "x$ENABLED_US
 AM_CONDITIONAL([BUILD_MD5],[test "x$ENABLED_MD5" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
 AM_CONDITIONAL([BUILD_SHA],[test "x$ENABLED_SHA" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
 AM_CONDITIONAL([BUILD_FIPS],[test "x$ENABLED_FIPS" = "xyes"])
+AC_SUBST([ENABLED_FIPS])
 AM_CONDITIONAL([BUILD_FIPS_V1],[test "$HAVE_FIPS_VERSION" = 1])
 AM_CONDITIONAL([BUILD_FIPS_V2],[test "$HAVE_FIPS_VERSION" = 2 && test "$HAVE_FIPS_VERSION_MINOR" = 0])
 AM_CONDITIONAL([BUILD_FIPS_RAND],[test "$HAVE_FIPS_VERSION" = 2 && test "$HAVE_FIPS_VERSION_MINOR" = 1])
@@ -8170,6 +8267,7 @@ AM_CONDITIONAL([BUILD_CAVIUM_V],[test "x$ENABLED_CAVIUM_V" = "xyes"])
 AM_CONDITIONAL([BUILD_OCTEON_SYNC],[test "x$ENABLED_OCTEON_SYNC" = "xyes"])
 AM_CONDITIONAL([BUILD_INTEL_QA],[test "x$ENABLED_INTEL_QA" = "xyes"])
 AM_CONDITIONAL([BUILD_INTEL_QA_SYNC],[test "x$ENABLED_INTEL_QA_SYNC" = "xyes"])
+INCLUDE_SP_INT="no"
 AM_CONDITIONAL([BUILD_SP],[test "x$ENABLED_SP" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
 AM_CONDITIONAL([BUILD_SP_C32],[ ( ( (test "$ENABLED_SP_RSA" = "yes" || test "$ENABLED_SP_DH" = "yes" \
                                || test "$ENABLED_SP_ECC" = "yes") && test "x$ENABLED_SP_ASM" = "xno") \
@@ -8183,6 +8281,9 @@ AM_CONDITIONAL([BUILD_SP_ARM_THUMB],[test "x$ENABLED_SP_ARM_THUMB_ASM" = "xyes" 
 AM_CONDITIONAL([BUILD_SP_ARM_CORTEX],[test "x$ENABLED_SP_ARM_CORTEX_ASM" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
 AM_CONDITIONAL([BUILD_SP_X86_64],[test "x$ENABLED_SP_X86_64_ASM" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
 AM_CONDITIONAL([BUILD_SP_INT],[test "x$ENABLED_SP_MATH" = "xyes" || test "x$ENABLED_SP_MATH_ALL" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
+AM_COND_IF([BUILD_SP], [INCLUDE_SP_INT="yes"])
+AM_COND_IF([BUILD_SP_INT], [INCLUDE_SP_INT="yes"])
+AC_SUBST([INCLUDE_SP_INT])
 AM_CONDITIONAL([BUILD_FAST_RSA],[test "x$ENABLED_FAST_RSA" = "xyes"])
 AM_CONDITIONAL([BUILD_MCAPI],[test "x$ENABLED_MCAPI" = "xyes"])
 AM_CONDITIONAL([BUILD_ASYNCCRYPT],[test "x$ENABLED_ASYNCCRYPT" = "xyes"])
@@ -8212,8 +8313,8 @@ AM_CONDITIONAL([BUILD_PSA],[test "x$ENABLED_PSA" = "xyes"])
 AM_CONDITIONAL([BUILD_DTLS13],[test "x$ENABLED_DTLS13" = "xyes"])
 AM_CONDITIONAL([BUILD_QUIC],[test "x$ENABLED_QUIC" = "xyes"])
 AM_CONDITIONAL([BUILD_DTLS_CID],[test "x$ENABLED_DTLS_CID" = "xyes"])
+AM_CONDITIONAL([BUILD_DTLS],[test "x$ENABLED_DTLS" = "xyes"])
 AM_CONDITIONAL([BUILD_HPKE],[test "x$ENABLED_HPKE" = "xyes"])
-
 
 if test "$ENABLED_REPRODUCIBLE_BUILD" != "yes" &&
    (test "$ax_enable_debug" = "yes" ||
@@ -8637,6 +8738,7 @@ echo "   * IoT-Safe:                   $ENABLED_IOTSAFE"
 echo "   * IoT-Safe HWRNG:             $ENABLED_IOTSAFE_HWRNG"
 echo "   * NXP SE050:                  $ENABLED_SE050"
 echo "   * PSA:                        $ENABLED_PSA"
+echo "   * System CA certs:            $ENABLED_SYS_CA_CERTS"
 echo ""
 echo "---"
 

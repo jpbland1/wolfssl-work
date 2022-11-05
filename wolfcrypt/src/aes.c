@@ -306,7 +306,7 @@ block cipher mechanism that uses n-bit binary string parameter key with 128-bits
     #include <wolfcrypt/src/misc.c>
 #endif
 
-#if !defined(WOLFSSL_ARMASM)
+#ifndef WOLFSSL_ARMASM
 
 #ifdef WOLFSSL_IMX6_CAAM_BLOB
     /* case of possibly not using hardware acceleration for AES but using key
@@ -738,7 +738,7 @@ block cipher mechanism that uses n-bit binary string parameter key with 128-bits
                              XASM_LINK("AES_CBC_encrypt");
 
         #ifdef HAVE_AES_DECRYPT
-            #if defined(WOLFSSL_AESNI_BY4)
+            #if defined(WOLFSSL_AESNI_BY4) || defined(WOLFSSL_X86_BUILD)
                 void AES_CBC_decrypt_by4(const unsigned char* in, unsigned char* out,
                                          unsigned char* ivec, unsigned long length,
                                          const unsigned char* KS, int nr)
@@ -4191,7 +4191,7 @@ int wc_AesSetIV(Aes* aes, const byte* iv)
             /* if input and output same will overwrite input iv */
             XMEMCPY(aes->tmp, in + sz - AES_BLOCK_SIZE, AES_BLOCK_SIZE);
             SAVE_VECTOR_REGISTERS(return _svr_ret;);
-            #if defined(WOLFSSL_AESNI_BY4)
+            #if defined(WOLFSSL_AESNI_BY4) || defined(WOLFSSL_X86_BUILD)
             AES_CBC_decrypt_by4(in, out, (byte*)aes->reg, sz, (byte*)aes->key,
                             aes->rounds);
             #elif defined(WOLFSSL_AESNI_BY6)
@@ -4224,7 +4224,7 @@ int wc_AesSetIV(Aes* aes, const byte* iv)
 
         return 0;
     }
-    #endif
+    #endif /* HAVE_AES_DECRYPT */
 
 #endif /* AES-CBC block */
 #endif /* HAVE_AES_CBC */
@@ -4691,6 +4691,7 @@ static void GenerateM0(Aes* aes)
 
 #elif defined(GCM_TABLE_4BIT)
 
+#if !defined(BIG_ENDIAN_ORDER) && !defined(WC_16BIT_CPU)
 static WC_INLINE void Shift4_M0(byte *r8, byte* z8)
 {
     int i;
@@ -4698,6 +4699,7 @@ static WC_INLINE void Shift4_M0(byte *r8, byte* z8)
         r8[i] = (z8[i-1] << 4) | (z8[i] >> 4);
     r8[0] = z8[0] >> 4;
 }
+#endif
 
 static void GenerateM0(Aes* aes)
 {
@@ -4820,10 +4822,8 @@ int wc_AesGcmSetKey(Aes* aes, const byte* key, word32 len)
     }
 #endif /* FREESCALE_LTC_AES_GCM */
 
-#if defined(WOLFSSL_XILINX_CRYPT)
-    wc_AesGcmSetKey_ex(aes, key, len, XSECURE_CSU_AES_KEY_SRC_KUP);
-#elif defined(WOLFSSL_AFALG_XILINX_AES)
-    wc_AesGcmSetKey_ex(aes, key, len, 0);
+#if defined(WOLFSSL_XILINX_CRYPT) || defined(WOLFSSL_AFALG_XILINX_AES)
+    wc_AesGcmSetKey_ex(aes, key, len, WOLFSSL_XILINX_AES_KEY_SRC);
 #endif
 
 #ifdef WOLF_CRYPTO_CB
@@ -7419,9 +7419,8 @@ int wc_AesGcmEncrypt(Aes* aes, byte* out, const byte* in, word32 sz,
 #ifdef STM32_CRYPTO_AES_GCM
 
 /* this function supports inline encrypt */
-/* define STM32_AESGCM_PARTIAL for newer STM Cube HAL's with workaround
-   for handling partial packets to improve auth tag calculation performance by
-   using hardware */
+/* define STM32_AESGCM_PARTIAL for STM HW that does not support authentication
+ * on byte multiples (see CRYP_HEADERWIDTHUNIT_BYTE) */
 static WARN_UNUSED_RESULT int wc_AesGcmEncrypt_STM32(
                                   Aes* aes, byte* out, const byte* in, word32 sz,
                                   const byte* iv, word32 ivSz,
@@ -7527,9 +7526,6 @@ static WARN_UNUSED_RESULT int wc_AesGcmEncrypt_STM32(
     hcryp.Init.HeaderSize = authInSz;
     #else
     hcryp.Init.HeaderSize = authPadSz/sizeof(word32);
-    #endif
-    #ifdef STM32_AESGCM_PARTIAL
-    hcryp.Init.HeaderPadSize = authPadSz - authInSz;
     #endif
     #ifdef CRYP_KEYIVCONFIG_ONCE
     /* allows repeated calls to HAL_CRYP_Encrypt */
@@ -7869,7 +7865,7 @@ int wc_AesGcmEncrypt(Aes* aes, byte* out, const byte* in, word32 sz,
     }
     else
     #endif
-    #ifdef HAVE_INTEL_AVX1
+    #if defined(HAVE_INTEL_AVX1)
     if (IS_INTEL_AVX1(intel_flags)) {
         SAVE_VECTOR_REGISTERS(return _svr_ret;);
         AES_GCM_encrypt_avx1(in, out, authIn, iv, authTag, sz, authInSz, ivSz,
@@ -8055,9 +8051,6 @@ static WARN_UNUSED_RESULT int wc_AesGcmDecrypt_STM32(
     #else
     hcryp.Init.HeaderSize = authPadSz/sizeof(word32);
     #endif
-    #ifdef STM32_AESGCM_PARTIAL
-    hcryp.Init.HeaderPadSize = authPadSz - authInSz;
-    #endif
     #ifdef CRYP_KEYIVCONFIG_ONCE
     /* allows repeated calls to HAL_CRYP_Decrypt */
     hcryp.Init.KeyIVConfigSkip = CRYP_KEYIVCONFIG_ONCE;
@@ -8080,7 +8073,7 @@ static WARN_UNUSED_RESULT int wc_AesGcmDecrypt_STM32(
         XMEMSET(partialBlock, 0, sizeof(partialBlock));
         XMEMCPY(partialBlock, in + (blocks * AES_BLOCK_SIZE), partial);
         status = HAL_CRYP_Decrypt(&hcryp, (uint32_t*)partialBlock, partial,
-(           uint32_t*)partialBlock, STM32_HAL_TIMEOUT);
+            (uint32_t*)partialBlock, STM32_HAL_TIMEOUT);
         XMEMCPY(out + (blocks * AES_BLOCK_SIZE), partialBlock, partial);
     }
     #endif
@@ -8204,7 +8197,7 @@ int WARN_UNUSED_RESULT AES_GCM_decrypt_C(
                       const byte* authTag, word32 authTagSz,
                       const byte* authIn, word32 authInSz)
 {
-    int ret = 0;
+    int ret;
     word32 blocks = sz / AES_BLOCK_SIZE;
     word32 partial = sz % AES_BLOCK_SIZE;
     const byte* c = in;
@@ -8240,6 +8233,19 @@ int WARN_UNUSED_RESULT AES_GCM_decrypt_C(
     if (ret != 0)
         return ret;
     xorbuf(Tprime, EKY0, sizeof(Tprime));
+#ifdef WC_AES_GCM_DEC_AUTH_EARLY
+    /* ConstantCompare returns the cumulative bitwise or of the bitwise xor of
+     * the pairwise bytes in the strings.
+     */
+    res = ConstantCompare(authTag, Tprime, authTagSz);
+    /* convert positive retval from ConstantCompare() to all-1s word, in
+     * constant time.
+     */
+    res = 0 - (sword32)(((word32)(0 - res)) >> 31U);
+    ret = res & AES_GCM_AUTH_E;
+    if (ret != 0)
+        return ret;
+#endif
 
 #ifdef OPENSSL_EXTRA
     if (!out) {
@@ -8306,6 +8312,7 @@ int WARN_UNUSED_RESULT AES_GCM_decrypt_C(
         XMEMCPY(p, scratch, partial);
     }
 
+#ifndef WC_AES_GCM_DEC_AUTH_EARLY
     /* ConstantCompare returns the cumulative bitwise or of the bitwise xor of
      * the pairwise bytes in the strings.
      */
@@ -8318,7 +8325,7 @@ int WARN_UNUSED_RESULT AES_GCM_decrypt_C(
      * mismatch, whereupon AES_GCM_AUTH_E is returned.
      */
     ret = (ret & ~res) | (res & AES_GCM_AUTH_E);
-
+#endif
     return ret;
 }
 
@@ -8416,7 +8423,7 @@ int wc_AesGcmDecrypt(Aes* aes, byte* out, const byte* in, word32 sz,
     }
     else
     #endif
-    #ifdef HAVE_INTEL_AVX1
+    #if defined(HAVE_INTEL_AVX1)
     if (IS_INTEL_AVX1(intel_flags)) {
         SAVE_VECTOR_REGISTERS(return _svr_ret;);
         AES_GCM_decrypt_avx1(in, out, authIn, iv, authTag, sz, authInSz, ivSz,
@@ -9037,7 +9044,7 @@ static WARN_UNUSED_RESULT int AesGcmEncryptFinal_aesni(
     extern "C" {
 #endif
 
-/* Assembly code implementations in: aes_gcm_asm.S */
+/* Assembly code implementations in: aes_gcm_asm.S and aes_gcm_x86_asm.S */
 #ifdef HAVE_INTEL_AVX2
 extern void AES_GCM_decrypt_update_avx2(const unsigned char* key, int nr,
     unsigned char* out, const unsigned char* in, unsigned int nbytes,

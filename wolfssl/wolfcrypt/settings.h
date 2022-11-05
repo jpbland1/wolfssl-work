@@ -1641,8 +1641,10 @@ extern void uITRON4_free(void *p) ;
 
 
 #if defined(WOLFSSL_XILINX)
+    #if !defined(WOLFSSL_XILINX_CRYPT_VERSAL)
+        #define NO_DEV_RANDOM
+    #endif
     #define NO_WOLFSSL_DIR
-    #define NO_DEV_RANDOM
     #define HAVE_AESGCM
 #endif
 
@@ -1924,7 +1926,9 @@ extern void uITRON4_free(void *p) ;
     #if !defined(USE_INTEGER_HEAP_MATH)
         #undef  USE_FAST_MATH
         #define USE_FAST_MATH
-        #define FP_MAX_BITS 8192
+        #ifndef FP_MAX_BITS
+            #define FP_MAX_BITS 8192
+        #endif
     #endif
 #endif
 /*----------------------------------------------------------------------------*/
@@ -1935,7 +1939,16 @@ extern void uITRON4_free(void *p) ;
 /* user can specify what curves they want with ECC_USER_CURVES otherwise
  * all curves are on by default for now */
 #ifndef ECC_USER_CURVES
-    #if !defined(WOLFSSL_SP_MATH) && !defined(HAVE_ALL_CURVES)
+    #ifdef WOLFSSL_SP_MATH
+        /* for single precision math only make sure the enabled key sizes are
+         * included in the ECC curve table */
+        #if defined(WOLFSSL_SP_384) && !defined(HAVE_ECC384)
+            #define HAVE_ECC384
+        #endif
+        #if defined(WOLFSSL_SP_521) && !defined(HAVE_ECC521)
+            #define HAVE_ECC521
+        #endif
+    #elif !defined(HAVE_ALL_CURVES)
         #define HAVE_ALL_CURVES
     #endif
 #endif
@@ -2366,9 +2379,6 @@ extern void uITRON4_free(void *p) ;
     #ifndef USE_WOLF_STRTOK
         #define USE_WOLF_STRTOK
     #endif
-    #ifndef WOLFSSL_SP_DIV_WORD_HALF
-        #define WOLFSSL_SP_DIV_WORD_HALF
-    #endif
     #ifndef WOLFSSL_OLD_PRIME_CHECK
         #define WOLFSSL_OLD_PRIME_CHECK
     #endif
@@ -2576,7 +2586,8 @@ extern void uITRON4_free(void *p) ;
 
 #if defined(WOLFCRYPT_ONLY) && defined(NO_AES) && !defined(WOLFSSL_SHA384) && \
     !defined(WOLFSSL_SHA512) && defined(WC_NO_RNG) && \
-    !defined(WOLFSSL_SP_MATH) && !defined(WOLFSSL_SP_MATH_ALL)
+    !defined(WOLFSSL_SP_MATH) && !defined(WOLFSSL_SP_MATH_ALL) \
+    && !defined(USE_FAST_MATH)
     #undef  WOLFSSL_NO_FORCE_ZERO
     #define WOLFSSL_NO_FORCE_ZERO
 #endif
@@ -2806,6 +2817,23 @@ extern void uITRON4_free(void *p) ;
     #define WOLFSSL_RSA_KEY_CHECK
 #endif
 
+/* SHAKE - Not allowed in FIPS */
+#if defined(WOLFSSL_SHA3) && !defined(HAVE_SELFTEST) && !defined(HAVE_FIPS)
+    #ifndef WOLFSSL_NO_SHAKE128
+        #undef  WOLFSSL_SHAKE128
+        #define WOLFSSL_SHAKE128
+    #endif
+    #ifndef WOLFSSL_NO_SHAKE256
+        #undef  WOLFSSL_SHAKE256
+        #define WOLFSSL_SHAKE256
+    #endif
+#else
+    #undef  WOLFSSL_NO_SHAKE128
+    #define WOLFSSL_NO_SHAKE128
+    #undef  WOLFSSL_NO_SHAKE256
+    #define WOLFSSL_NO_SHAKE256
+#endif
+
 
 
 
@@ -2831,6 +2859,17 @@ extern void uITRON4_free(void *p) ;
     #undef WOLFSSL_ASYNC_IO
     #define WOLFSSL_ASYNC_IO
 #endif
+
+#ifdef WOLFSSL_SYS_CA_CERTS
+    #ifdef NO_FILESYSTEM
+        #warning "Turning off WOLFSSL_SYS_CA_CERTS b/c NO_FILESYSTEM is defined."
+        #undef WOLFSSL_SYS_CA_CERTS
+    #endif
+    #ifdef NO_CERTS
+        #warning "Turning off WOLFSSL_SYS_CA_CERTS b/c NO_CERTS is defined."
+        #undef WOLFSSL_SYS_CA_CERTS
+    #endif
+#endif /* WOLFSSL_SYS_CA_CERTS */
 
 #ifdef __cplusplus
     }   /* extern "C" */
