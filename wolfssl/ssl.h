@@ -993,14 +993,17 @@ WOLFSSL_API WOLFSSL_METHOD *wolfSSLv23_method(void);
 #endif /* WOLFSSL_DTLS */
 
 #if defined(HAVE_HPKE) && defined(HAVE_ECC)
+WOLFSSL_API int wolfSSLGenerateEchConfig(WOLFSSL_CTX* ctx,
+    const char* publicName);
+
 WOLFSSL_API int wolfSSLSetEchConfigs64(WOLFSSL* ssl, char* echConfigs64,
-  word32 echConfigs64Len);
+    word32 echConfigs64Len);
 
 WOLFSSL_API int wolfSSLSetEchConfigs(WOLFSSL* ssl, const byte* echConfigs,
-  word32 echConfigsLen);
+    word32 echConfigsLen);
 
 WOLFSSL_API int wolfSSLGetEchConfigs(WOLFSSL* ssl, byte* echConfigs,
-  word32* echConfigsLen);
+    word32* echConfigsLen);
 #endif
 
 #ifdef HAVE_POLY1305

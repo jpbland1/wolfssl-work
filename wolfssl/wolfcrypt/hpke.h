@@ -106,16 +106,16 @@ typedef struct {
 } HpkeBaseContext;
 
 WOLFSSL_API int wc_HpkeInit(Hpke* hpke, int kem, int kdf, int aead, void* heap);
-WOLFSSL_API int wc_HpkeGenerateKeyPair(Hpke* hpke, void** keypair);
-WOLFSSL_API int wc_HpkeSerializePublicKey(Hpke* hpke, void* key, byte* out, word32* outSz);
+WOLFSSL_API int wc_HpkeGenerateKeyPair(Hpke* hpke, void** keypair, WC_RNG* rng);
+WOLFSSL_API int wc_HpkeSerializePublicKey(Hpke* hpke, void* key, byte* out, word16* outSz);
 WOLFSSL_API int wc_HpkeDeserializePublicKey(Hpke* hpke, void** key, const byte* in,
-    word32 inSz);
+    word16 inSz);
 WOLFSSL_API void wc_HpkeFreeKey(Hpke* hpke, void* keypair);
 WOLFSSL_API int wc_HpkeSealBase(Hpke* hpke, void* ephemeralKey, void* receiverKey,
     byte* info, word32 infoSz, byte* aad, word32 aadSz, byte* plaintext,
     word32 ptSz, byte* ciphertext);
 WOLFSSL_API int wc_HpkeOpenBase(Hpke* hpke, void* receiverKey, const byte* pubKey,
-    word32 pubKeySz, byte* info, word32 infoSz, byte* aad, word32 aadSz,
+    word16 pubKeySz, byte* info, word32 infoSz, byte* aad, word32 aadSz,
     byte* ciphertext, word32 ctSz, byte* plaintext);
 
 #endif

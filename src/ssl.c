@@ -274,6 +274,113 @@ const WOLF_EC_NIST_NAME kNistCurves[] = {
 #endif
 
 #if defined(HAVE_HPKE) && defined(HAVE_ECC)
+int wolfSSLGenerateEchConfig(WOLFSSL_CTX* ctx, const char* publicName)
+{
+    int ret = 0;
+    int rng_ret = 0;
+    word16 encLen = 32;
+#ifdef WOLFSSL_SMALL_STACK
+    Hpke* hpke;
+    WC_RNG* rng;
+#else
+    Hpke hpke[1];
+    WC_RNG rng[1];
+#endif
+
+    if (ctx == NULL || publicName == NULL)
+      return BAD_FUNC_ARG;
+
+    ctx->echConfigs = (EchConfig*)XMALLOC(sizeof(EchConfig), ctx->heap,
+        DYNAMIC_TYPE_NONE);
+    ForceZero(ctx->echConfigs, sizeof(EchConfig));
+
+    if (ctx->echConfigs == NULL)
+        return MEMORY_E;
+
+#ifdef WOLFSSL_SMALL_STACK
+    hpke = MALLOC(sizeof(Hpke), ctx->heap, DYNAMIC_TYPE_NONE);
+
+    if (hpke == NULL)
+        return MEMORY_E;
+
+    rng = MALLOC(sizeof(Hpke), ctx->heap, DYNAMIC_TYPE_RNG);
+
+    if (rng == NULL)
+        return MEMORY_E;
+#endif
+
+    ret = rng_ret = wc_InitRng(rng);
+
+    /* set random config id */
+    if (rng_ret == 0)
+        ret = wc_RNG_GenerateByte(rng, &ctx->echConfigs->configId);
+
+    if (ret == 0) {
+        /* set the kem id */
+        ctx->echConfigs->kemId = DHKEM_X25519_HKDF_SHA256;
+
+        /* set the cipher suite, only 1 for now */
+        ctx->echConfigs->numCipherSuites = 1;
+        ctx->echConfigs->cipherSuites =
+            (EchCipherSuite*)XMALLOC(sizeof(EchCipherSuite), ctx->heap,
+            DYNAMIC_TYPE_NONE);
+
+        if (ctx->echConfigs->cipherSuites == NULL) {
+            ret = MEMORY_E;
+        }
+        else {
+            ctx->echConfigs->cipherSuites[0].kdfId = HKDF_SHA256;
+            ctx->echConfigs->cipherSuites[0].aeadId = HPKE_AES_128_GCM;
+        }
+    }
+
+    if (ret == 0)
+        ret = wc_HpkeInit(hpke, DHKEM_X25519_HKDF_SHA256, HKDF_SHA256,
+            HPKE_AES_128_GCM, ctx->heap);
+
+    /* generate the receiver private key */
+    if (rng_ret == 0 && ret == 0)
+        ret = wc_HpkeGenerateKeyPair(hpke, &ctx->echConfigs->receiverPrivkey, rng);
+
+    if (rng_ret == 0)
+        wc_FreeRng(rng);
+
+    /* serialize the reciver key */
+    if (ret == 0)
+        ret = wc_HpkeSerializePublicKey(hpke, ctx->echConfigs->receiverPrivkey,
+            ctx->echConfigs->receiverPubkey, &encLen);
+
+    if (ret == 0) {
+        ctx->echConfigs->publicName = XMALLOC(XSTRLEN(publicName) + 1,
+            ctx->heap, DYNAMIC_TYPE_NONE);
+
+        if (ctx->echConfigs->publicName == NULL) {
+            ret = MEMORY_E;
+        }
+        else {
+            XMEMCPY(ctx->echConfigs->publicName, publicName,
+                XSTRLEN(publicName));
+        }
+    }
+
+    if(ret != 0) {
+        if (ctx->echConfigs->cipherSuites != NULL)
+            XFREE(ctx->echConfigs->cipherSuites, ctx->heap,
+                DYNAMIC_TYPE_NONE);
+
+        if (ctx->echConfigs->publicName != NULL)
+            XFREE(ctx->echConfigs->publicName, ctx->heap,
+                DYNAMIC_TYPE_NONE);
+
+        XFREE(ctx->echConfigs, ctx->heap, DYNAMIC_TYPE_NONE);
+    }
+
+    if (ret == 0)
+        ret = WOLFSSL_SUCCESS;
+
+    return ret;
+}
+
 int wolfSSLSetEchConfigs64(WOLFSSL* ssl, char* echConfigs64,
     word32 echConfigs64Len)
 {
@@ -389,7 +496,7 @@ int wolfSSLSetEchConfigs(WOLFSSL* ssl, const byte* echConfigs,
             echConfig += 2;
             workingConfig->numCipherSuites = cipherSuitesLen / 4;
             /* cipherSuites */
-            for ( j = 0; j < workingConfig->numCipherSuites; j++ ) {
+            for (j = 0; j < workingConfig->numCipherSuites; j++) {
                 workingConfig->cipherSuites[j].kdfId =
                   XNTOHS(*((word16*)(echConfig + j * 4)));
                 workingConfig->cipherSuites[j].aeadId =
@@ -438,155 +545,205 @@ int wolfSSLSetEchConfigs(WOLFSSL* ssl, const byte* echConfigs,
     return -1;
 }
 
-int wolfSSLGetEchConfigs(WOLFSSL* ssl, byte* echConfigs,
-  word32* echConfigsLen)
+int wolfSSLGetEchConfig(EchConfig* config, byte* output,
+    word32* outputLen)
 {
     int i;
-    EchConfig* workingConfig = NULL;
-    byte* echConfigStart;
-    byte* echConfig = echConfigs + 2;
-    word16 totalSize = 2;
+    byte* outputStart = output;
+    word16 totalLen = 0;
 
+    if (config == NULL || (output == NULL && outputLen == NULL))
+        return BAD_FUNC_ARG;
+
+    /* 2 for version */
+    totalLen += 2;
+    /* 2 for length */
+    totalLen += 2;
+    /* 1 for configId */
+    totalLen += 1;
+    /* 2 for kemId */
+    totalLen += 2;
+    /* 2 for hpke_len */
+    totalLen += 2;
+
+    /* hpke_pub_key */
+    switch (config->kemId) {
+        case DHKEM_P256_HKDF_SHA256:
+            totalLen += 65;
+            break;
+        case DHKEM_P384_HKDF_SHA384:
+            totalLen += 97;
+            break;
+        case DHKEM_P521_HKDF_SHA512:
+            totalLen += 133;
+            break;
+        case DHKEM_X25519_HKDF_SHA256:
+            totalLen += 32;
+            break;
+        case DHKEM_X448_HKDF_SHA512:
+            totalLen += 56;
+            break;
+    }
+
+    /* cipherSuitesLen */
+    totalLen += 2;
+    /* cipherSuites */
+    totalLen += config->numCipherSuites * 4;
+    /* public name len */
+    totalLen += 2;
+    /* public name */
+    totalLen += XSTRLEN(config->publicName);
+    /* trailing zeros */
+    totalLen += 2;
+
+    if (output == NULL) {
+        *outputLen = totalLen;
+        return LENGTH_ONLY_E;
+    }
+
+    if (totalLen > *outputLen) {
+        *outputLen = totalLen;
+        return INPUT_SIZE_E;
+    }
+
+    /* version */
+    c16toa(0xfe0d, output);
+    output += 4;
+    /* configId */
+    *output = config->configId;
+    output++;
+    /* kemId */
+    c16toa(config->kemId, output);
+    output += 2;
+
+    /* length and key itself */
+    switch (config->kemId) {
+        case DHKEM_P256_HKDF_SHA256:
+            c16toa(65, output);
+            output += 2;
+            XMEMCPY(output, config->receiverPubkey, 65);
+            output += 65;
+            break;
+        case DHKEM_P384_HKDF_SHA384:
+            c16toa(97, output);
+            output += 2;
+            XMEMCPY(output, config->receiverPubkey, 97);
+            output += 97;
+            break;
+        case DHKEM_P521_HKDF_SHA512:
+            c16toa(133, output);
+            output += 2;
+            XMEMCPY(output, config->receiverPubkey, 133);
+            output += 133;
+            break;
+        case DHKEM_X25519_HKDF_SHA256:
+            c16toa(32, output);
+            output += 2;
+            XMEMCPY(output, config->receiverPubkey, 32);
+            output += 32;
+            break;
+        case DHKEM_X448_HKDF_SHA512:
+            c16toa(56, output);
+            output += 2;
+            XMEMCPY(output, config->receiverPubkey, 56);
+            output += 56;
+            break;
+    }
+
+    /* cipherSuites len */
+    c16toa(config->numCipherSuites * 4, output);
+    output += 2;
+
+    /* cipherSuites */
+    for (i = 0; i < config->numCipherSuites; i++) {
+        c16toa(config->cipherSuites[i].kdfId, output);
+        output += 2;
+        c16toa(config->cipherSuites[i].aeadId, output);
+        output += 2;
+    }
+
+    /* publicName len */
+    c16toa(XSTRLEN(config->publicName), output);
+    output += 2;
+
+    /* publicName */
+    XMEMCPY(output, config->publicName,
+        XSTRLEN(config->publicName));
+    output += XSTRLEN(config->publicName);
+
+    /* terminating zeros */
+    c16toa(0, output);
+    output += 2;
+
+    /* length - 4 for version and length itself */
+    c16toa((word16)(output - outputStart) - 4, outputStart + 2);
+
+    *outputLen = totalLen;
+
+    return 0;
+}
+
+int wolfSSLGetEchConfigs(WOLFSSL* ssl, byte* output,
+    word32* outputLen)
+{
     /* if we don't have ech configs */
     if (ssl->options.useEch != 1) {
         return -1;
     }
 
-    workingConfig = ssl->echConfigs;
+    return wolfSSLGetEchConfigsEx(ssl->echConfigs, output, outputLen);
+}
 
-    /* calculate length */
+int wolfSSLGetEchConfigsEx(EchConfig* configs, byte* output, word32* outputLen)
+{
+    int ret;
+    EchConfig* workingConfig = NULL;
+    byte* outputStart = output;
+    word32 totalLen = 2;
+    word32 workingOutputLen = *outputLen - totalLen;
+
+    /* skip over total length which we fill in later */
+    if (output != NULL)
+        output += 2;
+
+    workingConfig = configs;
+
     while (workingConfig != NULL) {
-        /* 2 for version */
-        totalSize += 2;
-        /* 2 for length */
-        totalSize += 2;
-        /* 1 for configId */
-        totalSize += 1;
-        /* 2 for kemId */
-        totalSize += 2;
-        /* 2 for hpke_len */
-        totalSize += 2;
+        /* get this config */
+        ret = wolfSSLGetEchConfig(workingConfig, output, &workingOutputLen);
 
-        /* hpke_pub_key */
-        switch (workingConfig->kemId) {
-            case DHKEM_P256_HKDF_SHA256:
-                totalSize += 65;
-                break;
-            case DHKEM_P384_HKDF_SHA384:
-                totalSize += 97;
-                break;
-            case DHKEM_P521_HKDF_SHA512:
-                totalSize += 133;
-                break;
-            case DHKEM_X25519_HKDF_SHA256:
-                totalSize += 32;
-                break;
-            case DHKEM_X448_HKDF_SHA512:
-                totalSize += 56;
-                break;
-        }
+        if (output != NULL)
+            output += workingOutputLen;
 
-        /* cipherSuitesLen */
-        totalSize += 2;
-        /* cipherSuites */
-        totalSize += workingConfig->numCipherSuites * 4;
-        /* public name len */
-        totalSize += 2;
-        /* public name */
-        totalSize += XSTRLEN(workingConfig->publicName);
-        /* trailing zeros */
-        totalSize += 2;
+        /* add this config's length to the total length */
+        totalLen += workingOutputLen;
+
+        if (totalLen > *outputLen)
+            workingOutputLen = 0;
+        else
+          workingOutputLen = *outputLen - totalLen;
+
+        /* only error we break on, other 2 we need to keep finding length */
+        if (ret == BAD_FUNC_ARG)
+            return BAD_FUNC_ARG;
 
         workingConfig = workingConfig->next;
     }
 
-    if (totalSize > *echConfigsLen) {
-        return BUFFER_E;
+    if (output == NULL) {
+        *outputLen = totalLen;
+        return LENGTH_ONLY_E;
     }
 
-    /* now write */
+    if (totalLen > *outputLen) {
+        *outputLen = totalLen;
+        return INPUT_SIZE_E;
+    }
+
     /* total size -2 for size itself */
-    c16toa(totalSize - 2, echConfigs);
+    c16toa(totalLen - 2, outputStart);
 
-    workingConfig = ssl->echConfigs;
-
-    while (workingConfig != NULL) {
-        echConfigStart = echConfig;
-
-        /* version */
-        c16toa(0xfe0d, echConfig);
-        echConfig += 4;
-        /* configId */
-        *echConfig = workingConfig->configId;
-        echConfig++;
-        /* kemId */
-        c16toa(workingConfig->kemId, echConfig);
-        echConfig += 2;
-
-        /* length and key itself */
-        switch (workingConfig->kemId) {
-            case DHKEM_P256_HKDF_SHA256:
-                c16toa(65, echConfig);
-                echConfig += 2;
-                XMEMCPY(echConfig, workingConfig->receiverPubkey, 65);
-                echConfig += 65;
-                break;
-            case DHKEM_P384_HKDF_SHA384:
-                c16toa(97, echConfig);
-                echConfig += 2;
-                XMEMCPY(echConfig, workingConfig->receiverPubkey, 97);
-                echConfig += 97;
-                break;
-            case DHKEM_P521_HKDF_SHA512:
-                c16toa(133, echConfig);
-                echConfig += 2;
-                XMEMCPY(echConfig, workingConfig->receiverPubkey, 133);
-                echConfig += 133;
-                break;
-            case DHKEM_X25519_HKDF_SHA256:
-                c16toa(32, echConfig);
-                echConfig += 2;
-                XMEMCPY(echConfig, workingConfig->receiverPubkey, 32);
-                echConfig += 32;
-                break;
-            case DHKEM_X448_HKDF_SHA512:
-                c16toa(56, echConfig);
-                echConfig += 2;
-                XMEMCPY(echConfig, workingConfig->receiverPubkey, 56);
-                echConfig += 56;
-                break;
-        }
-
-        /* cipherSuites len */
-        c16toa(workingConfig->numCipherSuites * 4, echConfig);
-        echConfig += 2;
-
-        /* cipherSuites */
-        for (i = 0; i < workingConfig->numCipherSuites; i++) {
-            c16toa(workingConfig->cipherSuites[i].kdfId, echConfig);
-            echConfig += 2;
-            c16toa(workingConfig->cipherSuites[i].aeadId, echConfig);
-            echConfig += 2;
-        }
-
-        /* publicName len */
-        c16toa(XSTRLEN(workingConfig->publicName), echConfig);
-        echConfig += 2;
-
-        /* publicName */
-        XMEMCPY(echConfig, workingConfig->publicName,
-            XSTRLEN(workingConfig->publicName));
-        echConfig += XSTRLEN(workingConfig->publicName);
-
-        /* terminating zeros */
-        c16toa(0, echConfig);
-        echConfig += 2;
-
-        /* length - 4 for version and length itself */
-        c16toa((word16)(echConfig - echConfigStart) - 4, echConfigStart + 2);
-
-        workingConfig = workingConfig->next;
-    }
+    *outputLen = totalLen;
 
     return WOLFSSL_SUCCESS;
 }

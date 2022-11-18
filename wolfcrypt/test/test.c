@@ -22363,7 +22363,9 @@ WOLFSSL_TEST_SUBROUTINE int x963kdf_test(void)
 WOLFSSL_TEST_SUBROUTINE int hpke_test(void)
 {
     int ret;
+    int rng_ret;
     Hpke hpke[1];
+    WC_RNG rng[1];
     const char* start_text = "this is a test";
     const char* info_text = "info";
     const char* aad_text = "aad";
@@ -22372,22 +22374,25 @@ WOLFSSL_TEST_SUBROUTINE int hpke_test(void)
     void* receiverKey;
     void* ephemeralKey;
     uint8_t pubKey[HPKE_Npk_MAX]; /* public key */
-    word32 pubKeySz = (word32)sizeof(pubKey);
+    word16 pubKeySz = (word32)sizeof(pubKey);
 
-    //ret = wc_HpkeInit(hpke, DHKEM_P256_HKDF_SHA256, HKDF_SHA256,
-        //HPKE_AES_128_GCM, NULL); /* or HPKE_AES_256_GCM */
     ret = wc_HpkeInit(hpke, DHKEM_X25519_HKDF_SHA256, HKDF_SHA256,
         HPKE_AES_128_GCM, NULL); /* or HPKE_AES_256_GCM */
 
     if (ret != 0)
-      return ret;
+        return ret;
+
+    rng_ret = ret = wc_InitRng(rng);
+
+    if (ret != 0)
+        return ret;
 
     /* generate the keys */
     if (ret == 0)
-      ret = wc_HpkeGenerateKeyPair(hpke, &ephemeralKey);
+        ret = wc_HpkeGenerateKeyPair(hpke, &ephemeralKey, rng);
 
     if (ret == 0)
-      ret = wc_HpkeGenerateKeyPair(hpke, &receiverKey);
+        ret = wc_HpkeGenerateKeyPair(hpke, &receiverKey, rng);
 
     /* seal */
     if (ret == 0)
@@ -22413,10 +22418,13 @@ WOLFSSL_TEST_SUBROUTINE int hpke_test(void)
         ret = XMEMCMP(plaintext, start_text, XSTRLEN(start_text));
 
     if (ephemeralKey != NULL)
-      wc_HpkeFreeKey(hpke, ephemeralKey);
+        wc_HpkeFreeKey(hpke, ephemeralKey);
 
     if (receiverKey != NULL)
-      wc_HpkeFreeKey(hpke, receiverKey);
+        wc_HpkeFreeKey(hpke, receiverKey);
+
+    if (rng_ret == 0)
+        wc_FreeRng(rng);
 
     return ret;
 }

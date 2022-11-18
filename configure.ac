@@ -2929,7 +2929,7 @@ fi
 
 # HPKE
 AC_ARG_ENABLE([hpke],
-    [AS_HELP_STRING([--enable-hkdf],[Enable HKPE support (default: disabled)])],
+    [AS_HELP_STRING([--enable-hpke],[Enable HKPE support (default: disabled)])],
     [ ENABLED_HPKE=$enableval ],
     [ ENABLED_HPKE=no ]
     )

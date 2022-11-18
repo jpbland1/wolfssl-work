@@ -2586,8 +2586,21 @@ typedef enum {
 } TLSX_Type;
 
 #if defined(HAVE_HPKE) && defined(HAVE_ECC)
-#define ECH_TYPE_OUTER 0
-#define ECH_TYPE_INNER 1
+
+typedef enum
+{
+    ECH_TYPE_OUTER = 0,
+    ECH_TYPE_INNER = 1
+} EchType;
+
+typedef enum
+{
+    ECH_WRITE_GREASE,
+    ECH_WRITE_REAL,
+    ECH_WRITE_RETRY_CONFIGS,
+    ECH_WRITE_NONE,
+    ECH_PARSED_INTERNAL,
+} EchState;
 
 typedef struct EchCipherSuite
 {
@@ -2599,6 +2612,7 @@ typedef struct EchConfig
 {
     byte configId;
     word16 kemId;
+    void* receiverPrivkey;
     byte receiverPubkey[HPKE_Npk_MAX];
     byte numCipherSuites;
     EchCipherSuite* cipherSuites;
@@ -2615,22 +2629,28 @@ typedef struct ECH
     EchCipherSuite cipherSuite;
     byte configId;
     byte enc[HPKE_Npk_MAX];
-    word32 encLen;
+    word16 encLen;
     word32 innerClientHelloLen;
     word32 paddingLen;
     byte* innerClientHello;
     byte* outerClientPayload;
-    byte* aad;
+    const byte* aad;
     word32 aadLen;
     Hpke* hpke;
     void* ephemeralKey;
-    word32 isGrease:1;
+    EchState state;
     EchConfig* echConfig;
 } ECH;
 
-int EchConfigGetSupportedCipherSuite(EchConfig* config);
+WOLFSSL_LOCAL int EchConfigGetSupportedCipherSuite(EchConfig* config);
 
-WOLFSSL_LOCAL int   TLSX_FinalizeEch(ECH* ech, byte* aad, word32 aadLen);
+WOLFSSL_LOCAL int TLSX_FinalizeEch(ECH* ech, byte* aad, word32 aadLen);
+
+WOLFSSL_API int wolfSSLGetEchConfig(EchConfig* config, byte* output,
+    word32* outputLen);
+
+WOLFSSL_API int wolfSSLGetEchConfigsEx(EchConfig* configs, byte* output,
+    word32* outputLen);
 #endif
 
 typedef struct TLSX {
@@ -3481,6 +3501,9 @@ struct WOLFSSL_CTX {
     struct {
         const WOLFSSL_QUIC_METHOD *method;
     } quic;
+#endif
+#if defined(HAVE_HPKE) && defined(HAVE_ECC)
+    EchConfig* echConfigs;
 #endif
 };
 
@@ -5322,7 +5345,7 @@ struct WOLFSSL {
     } quic;
 #endif /* WOLFSSL_QUIC */
 #if defined(HAVE_HPKE) && defined(HAVE_ECC)
-  EchConfig* echConfigs;
+    EchConfig* echConfigs;
 #endif
 };
 

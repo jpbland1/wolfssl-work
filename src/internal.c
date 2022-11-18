@@ -2404,6 +2404,25 @@ void wolfSSL_CRYPTO_cleanup_ex_data(WOLFSSL_CRYPTO_EX_DATA* ex_data)
 }
 #endif /* HAVE_EX_DATA_CLEANUP_HOOKS */
 
+#if defined(HAVE_HPKE) && defined(HAVE_ECC)
+static void FreeEchConfigs(EchConfig* configs, void* heap)
+{
+    EchConfig* working_config = configs;
+    EchConfig* next_config;
+
+    while (working_config != NULL) {
+        next_config = working_config->next;
+        XFREE(working_config->cipherSuites, heap, DYNAMIC_TYPE_NONE);
+        XFREE(working_config->publicName, heap, DYNAMIC_TYPE_NONE);
+        if (working_config->raw != NULL)
+            XFREE(working_config->raw, heap, DYNAMIC_TYPE_NONE);
+        working_config = next_config;
+    }
+
+    (void)heap;
+}
+#endif
+
 /* In case contexts are held in array and don't want to free actual ctx. */
 
 /* The allocations done in InitSSL_Ctx must be free'd with ctx->onHeapHint
@@ -2560,6 +2579,10 @@ void SSL_CtxResourceFree(WOLFSSL_CTX* ctx)
         ctx->staticKELockInit = 0;
     }
     #endif
+#endif
+#if defined(HAVE_HPKE) && defined(HAVE_ECC)
+    FreeEchConfigs(ctx->echConfigs, ctx->heap);
+    ctx->echConfigs = NULL;
 #endif
     (void)heapAtCTXInit;
 }
@@ -7504,24 +7527,6 @@ void FreeSuites(WOLFSSL* ssl)
     ssl->suites = NULL;
 }
 
-#if defined(HAVE_HPKE) && defined(HAVE_ECC)
-static void FreeEchConfigs(WOLFSSL* ssl)
-{
-    EchConfig* working_config = ssl->echConfigs;
-    EchConfig* next_config;
-
-    while (working_config != NULL) {
-        next_config = working_config->next;
-        XFREE(working_config->cipherSuites, ssl->heap, DYNAMIC_TYPE_NONE);
-        XFREE(working_config->publicName, ssl->heap, DYNAMIC_TYPE_NONE);
-        XFREE(working_config->raw, ssl->heap, DYNAMIC_TYPE_NONE);
-        working_config = next_config;
-    }
-
-    ssl->echConfigs = NULL;
-}
-#endif
-
 
 /* In case holding SSL object in array and don't want to free actual ssl */
 void SSL_ResourceFree(WOLFSSL* ssl)
@@ -7568,8 +7573,9 @@ void SSL_ResourceFree(WOLFSSL* ssl)
     }
 
 #if defined(HAVE_HPKE) && defined(HAVE_ECC)
-    if (ssl->options.useEch) {
-        FreeEchConfigs(ssl);
+    if (ssl->options.useEch == 1) {
+        FreeEchConfigs(ssl->echConfigs, ssl->heap);
+        ssl->echConfigs = NULL;
         /* free the ech specific hashes */
         ssl->hsHashes = ssl->hsHashesEch;
         FreeHandshakeHashes(ssl);
